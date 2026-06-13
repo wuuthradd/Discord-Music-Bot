@@ -1,0 +1,241 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in as much detail as possible so we can reproduce and fix the issue.
+
+  # --- What happened ---
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear description of what went wrong.
+      placeholder: "When I use /play with a Spotify playlist, only the first track loads and the rest are silently skipped."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Exact steps to trigger the bug.
+      placeholder: |
+        1. Join a voice channel
+        2. Run `/play` with a Spotify playlist URL (50+ tracks)
+        3. Observe only 1 track is added
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened instead?
+      placeholder: "All tracks from the playlist should be added to the queue."
+    validations:
+      required: true
+
+  # --- Context ---
+
+  - type: dropdown
+    id: command
+    attributes:
+      label: Related Command
+      description: Which command is involved?
+      options:
+        - /play
+        - /pause
+        - /resume
+        - /stop
+        - /skip
+        - /previous
+        - /seek
+        - /select
+        - /loop
+        - /join
+        - /leave
+        - /search
+        - /queue
+        - /musicplayer
+        - /shuffle
+        - /move
+        - /remove
+        - /clear
+        - /history
+        - /playlist
+        - /radio
+        - /settings
+        - /manage
+        - /timeout
+        - /help
+        - Not command-specific
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source_type
+    attributes:
+      label: Audio Source
+      description: What type of content were you trying to play?
+      options:
+        - YouTube (video)
+        - YouTube (playlist)
+        - YouTube (live stream)
+        - YouTube Music
+        - Spotify (track)
+        - Spotify (album)
+        - Spotify (playlist)
+        - SoundCloud
+        - Direct URL / other yt-dlp supported site
+        - Radio session
+        - Not applicable
+    validations:
+      required: false
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often does this happen?
+      options:
+        - Every time
+        - Most of the time
+        - Sometimes
+        - Happened once
+    validations:
+      required: true
+
+  # --- Environment ---
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      placeholder: "Ubuntu 24.04 / Debian 12 / etc."
+    validations:
+      required: true
+
+  - type: input
+    id: python_version
+    attributes:
+      label: Python Version
+      description: "Run: `python3 --version`"
+      placeholder: "3.12.3"
+    validations:
+      required: true
+
+  - type: input
+    id: discordpy_version
+    attributes:
+      label: discord.py Version
+      description: "Run: `pip show discord.py | grep Version`"
+      placeholder: "2.5.2"
+    validations:
+      required: true
+
+  - type: input
+    id: ytdlp_version
+    attributes:
+      label: yt-dlp Version
+      description: "Run: `yt-dlp --version`"
+      placeholder: "2025.06.09"
+    validations:
+      required: true
+
+  - type: input
+    id: ffmpeg_version
+    attributes:
+      label: FFmpeg Version
+      description: "Run: `ffmpeg -version | head -1`"
+      placeholder: "ffmpeg version 7.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: js_runtime
+    attributes:
+      label: JavaScript Runtime
+      description: Which JS runtime is installed for yt-dlp?
+      options:
+        - deno
+        - node
+        - quickjs
+        - quickjs-ng
+        - None installed
+    validations:
+      required: true
+
+  # --- Bot Configuration ---
+
+  - type: input
+    id: locale
+    attributes:
+      label: Bot Locale
+      description: "Server language set in `/settings`"
+      placeholder: "en-US"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: prefetch
+    attributes:
+      label: Prefetch Enabled?
+      description: "Global setting in `/settings` (Performance section)"
+      options:
+        - "Yes (default)"
+        - "No"
+    validations:
+      required: false
+
+  - type: input
+    id: relevant_settings
+    attributes:
+      label: Relevant Settings
+      description: "Any non-default settings that might be related (permissions, limits, vote mode, etc.)"
+      placeholder: "pause_permission: dj, vote_mode: half, track_limit_users: 50"
+    validations:
+      required: false
+
+  # --- Logs & Evidence ---
+
+  - type: textarea
+    id: error_output
+    attributes:
+      label: Error Output / Traceback
+      description: Paste any error messages or tracebacks from the bot console.
+      render: python
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: If applicable, add screenshots of the Discord embed/message showing the issue.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Anything else that might help (queue size, number of users in VC, bot uptime, etc.)
+    validations:
+      required: false
+
+  # --- Checklist ---
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I am using the latest version of the bot
+          required: true
+        - label: I have checked existing issues and this is not a duplicate
+          required: true
+        - label: I have tested with default settings to rule out configuration issues
+          required: false
