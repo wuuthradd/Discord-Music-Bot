@@ -3,5 +3,6 @@ MyMusicBot_Token=
 SPOTIFY_CLIENT_ID=
 SPOTIFY_CLIENT_SECRET=
 # Cookie file for age-restricted YouTube content (Optional)
-# Setup.md already covers where to put cookies.txt file, if you want to set your cookie file outside of resources/ or even a different file name, give full path to that file (e.g .../folder/mycookies.txt)
-# YTDLP_COOKIE_FILE=
+# Default path is resources/cookies.txt if this is left empty
+# Set a custom path only if your cookie file is elsewhere (e.g. /home/user/mycookies.txt)
+YTDLP_COOKIE_FILE=

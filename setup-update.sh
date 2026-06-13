@@ -126,6 +126,7 @@ else
     sed -i 's/^\(MyMusicBot_Token=\).*/\1/' env-template
     sed -i 's/^\(SPOTIFY_CLIENT_ID=\).*/\1/' env-template
     sed -i 's/^\(SPOTIFY_CLIENT_SECRET=\).*/\1/' env-template
+    sed -i 's/^\(YTDLP_COOKIE_FILE=\).*/\1/' env-template
     info "Cleared keys in env-template"
 fi
 
