@@ -109,7 +109,7 @@ _VOTE_EMOJI = {
 }
 MAX_QUEUE = 5000                        # tracks, max items in the play queue
 EMBED_COLOR = 5053538
-README_URL = "https://github.com/OWNER/REPO#spotify-setup"
+README_URL = "https://github.com/wuuthradd/Discord-Music-Bot/blob/master/docs/SETUP.md#spotify-setup"
 
 _MISSING = object()
 
