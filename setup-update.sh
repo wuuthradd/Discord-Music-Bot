@@ -157,41 +157,7 @@ info "Installing requirements..."
 
 info "Requirements installed"
 
-# --- 8. Fetch and install SpotAPI ---
-info "Fetching SpotAPI from GitHub..."
-
-SPOTAPI_DIR="/tmp/SpotAPI_$$"
-rm -rf "$SPOTAPI_DIR"
-
-FETCHED=false
-if command -v git &>/dev/null; then
-    git clone --depth 1 https://github.com/Aran404/SpotAPI.git "$SPOTAPI_DIR" -q && FETCHED=true
-fi
-
-if [ "$FETCHED" = false ] && command -v gh &>/dev/null; then
-    gh repo clone Aran404/SpotAPI "$SPOTAPI_DIR" -- --depth 1 -q && FETCHED=true
-fi
-
-if [ "$FETCHED" = false ] && command -v curl &>/dev/null; then
-    mkdir -p "$SPOTAPI_DIR"
-    curl -sL https://github.com/Aran404/SpotAPI/archive/refs/heads/main.tar.gz | tar xz -C "$SPOTAPI_DIR" --strip-components=1 && FETCHED=true
-fi
-
-if [ "$FETCHED" = false ] && command -v wget &>/dev/null; then
-    mkdir -p "$SPOTAPI_DIR"
-    wget -qO- https://github.com/Aran404/SpotAPI/archive/refs/heads/main.tar.gz | tar xz -C "$SPOTAPI_DIR" --strip-components=1 && FETCHED=true
-fi
-
-[ "$FETCHED" = false ] && fail "Could not fetch SpotAPI. Install git, curl, or wget and try again."
-
-info "Installing SpotAPI..."
-
-.venv/bin/pip install --upgrade "$SPOTAPI_DIR" --no-cache-dir -q || fail "Failed to install SpotAPI."
-rm -rf "$SPOTAPI_DIR"
-
-info "SpotAPI installed"
-
-# --- 9. Create run_bot.sh ---
+# --- 8. Create run_bot.sh ---
 cat > run_bot.sh << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"

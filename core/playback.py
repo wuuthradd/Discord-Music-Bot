@@ -10,7 +10,7 @@ from typing import Callable
 import discord
 from discord.ext import commands
 
-from locales.localization import t
+from core.localization import t
 
 _log = logging.getLogger(__name__)
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
-from locales.localization import t, init_locales_cache, guild_locales, DEFAULT_LOCALE
+from core.localization import t, init_locales_cache, guild_locales, DEFAULT_LOCALE
 from core.playback import PlaybackManager, CommandCheckError, GuildMusicState, _task_done_cb
 from core.media import log_youtube_status
 from core.spotify import is_spotify_url
@@ -95,7 +95,7 @@ _QUEUE_FIELD_LABELS = {
     "playing_since":  "QUEUE_FOOTER_PLAYING_SINCE",
 }
 
-from db.db import db
+from core.db import db
 
 PLACEHOLDER_IMAGE_PATH = (Path(__file__).resolve().parent.parent / "resources" / "no_thumbnail.png").resolve()
 _PLACEHOLDER_EXISTS = PLACEHOLDER_IMAGE_PATH.exists()
@@ -296,6 +296,9 @@ class MusicHandlers(commands.Cog):
         self.bot_activity_interval: int = 120
         self.bot_activity_selected: int = 0
         self._activity_cycle_task: asyncio.Task | None = None
+        self._update_scheduler_task: asyncio.Task | None = None
+        self._last_pkg_update: float = 0.0
+        self._last_bot_update: float = 0.0
         self.active_playlists: dict[tuple[int, int], tuple] = {}  # (guild_id, user_id) -> (msg, view)
         self.playlist_busy: set[tuple[int, int]] = set()  # (guild_id, viewer_id) - blocks view re-creation while an action is running
         self.active_settings: dict[tuple[int, int], discord.Message] = {}  # (guild_id, user_id) -> msg
@@ -743,7 +746,7 @@ class MusicHandlers(commands.Cog):
             pass
 
     def _settings_loaders(self):
-        from db.db import db
+        from core.db import db
         return [
             ("DJ roles", db.get_all_dj_roles, self.dj_roles),
             ("vote_modes", db.get_all_vote_modes, self.vote_modes),
@@ -845,8 +848,8 @@ class MusicHandlers(commands.Cog):
 
     async def _reload_guild_from_db(self, guild_id: int):
         import json as _json
-        from db.db import db
-        from locales.localization import init_locales_cache
+        from core.db import db
+        from core.localization import init_locales_cache
 
         row = await db.get_guild_settings_row(guild_id)
 

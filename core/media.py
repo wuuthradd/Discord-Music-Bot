@@ -14,9 +14,9 @@ import yt_dlp
 
 _log = logging.getLogger(__name__)
 
-from locales.localization import t
+from core.localization import t
 
-_DEFAULT_COOKIE_PATH = Path(__file__).resolve().parent.parent / "resources" / "cookies.txt"
+_DEFAULT_COOKIE_PATH = Path(__file__).resolve().parent.parent / "db" / "cookies.txt"
 
 YTDLP_COOKIE_FILE = os.getenv("YTDLP_COOKIE_FILE")
 if YTDLP_COOKIE_FILE:

@@ -15,6 +15,7 @@ A feature rich Discord music bot built with [discord.py](https://github.com/Rapp
 - **Persistent views** - Music player and queue views survive bot restarts.
 - **SQLite database** - All settings and playlists stored locally with WAL mode.
 - **Lightweight intents** - Only requires `guilds` and `voice_states` intents.
+- **Auto-updates** - Both pip packages and bot itself has auto update capabilites can be set with intervals or fixed time.
 
 ## Documentation
 

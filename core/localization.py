@@ -6,10 +6,10 @@ from pathlib import Path
 
 import discord
 
-from db.db import db
+from core.db import db
 
 DEFAULT_LOCALE = "en-US"
-LOCALES_DIR = Path(__file__).resolve().parent
+LOCALES_DIR = Path(__file__).resolve().parent.parent / "locales"
 
 _strings: dict[str, dict[str, str]] = {}
 SUPPORTED_LOCALES: dict[str, str] = {}

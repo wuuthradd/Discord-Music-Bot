@@ -1,12 +1,7 @@
 __pycache__/
 *.pyc
 
-db/data.db
-db/data.db-shm
-db/data.db-wal
-
-resources/.tree_hash
-resources/cookies.txt
+db/
 
 .venv/
 

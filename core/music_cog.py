@@ -1,3 +1,4 @@
+import os
 import random
 import asyncio
 import gc
@@ -5,6 +6,7 @@ import io
 import json as _json
 import logging
 import re
+import sys
 import time
 
 _log = logging.getLogger(__name__)
@@ -18,9 +20,9 @@ except Exception:
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from db.db import db
+from core.db import db
 
-from locales.localization import t, SUPPORTED_LOCALES, DEFAULT_LOCALE, set_locale, guild_locales, load_locales, refresh_supported_locales, init_locales_cache
+from core.localization import t, SUPPORTED_LOCALES, DEFAULT_LOCALE, set_locale, guild_locales, load_locales, refresh_supported_locales, init_locales_cache
 from core.media import (
     extract_entries,
     extract_youtube_start_time,
@@ -10380,7 +10382,7 @@ class MusicCog(MusicHandlers):
 
         if action == "force_resync":
             import os
-            hash_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "resources", ".tree_hash")
+            hash_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "db", ".tree_hash")
             try:
                 os.remove(hash_file)
             except FileNotFoundError:
@@ -10388,6 +10390,209 @@ class MusicCog(MusicHandlers):
             return t(ctx, "MNG_RESYNC_DONE")
 
         return ""
+
+    # --- Update methods ---
+
+    _GITHUB_RELEASE_URL = "https://api.github.com/repos/wuuthradd/Discord-Music-Bot/releases/latest"
+    _BOT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    async def _get_pip_versions(self) -> dict[str, str]:
+        """Get currently installed package versions as {name: version}."""
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "pip", "list", "--format=json",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        try:
+            return {p["name"].lower(): p["version"] for p in _json.loads(stdout)}
+        except Exception:
+            return {}
+
+    async def _run_pip_update(self) -> tuple[list[str], bool]:
+        """Run pip install --upgrade -r requirements.txt.
+        Returns (list of change descriptions, whether anything changed)."""
+        req_path = os.path.join(self._BOT_ROOT, "requirements.txt")
+        before = await self._get_pip_versions()
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "pip", "install", "--upgrade",
+            "-r", req_path, "--no-cache-dir", "-q",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        await proc.communicate()
+        after = await self._get_pip_versions()
+        changes = []
+        for pkg, new_ver in after.items():
+            old_ver = before.get(pkg)
+            if old_ver and old_ver != new_ver:
+                changes.append(f"{pkg}: {old_ver} -> {new_ver}")
+        return changes, len(changes) > 0
+
+    async def _check_latest_version(self) -> tuple[str | None, str | None]:
+        """Check GitHub for latest release. Returns (latest_version, download_url) or (None, None)."""
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self._GITHUB_RELEASE_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        return None, None
+                    data = await resp.json()
+                    tag = data.get("tag_name", "")
+                    version = tag.lstrip("v")
+                    tarball = data.get("tarball_url")
+                    return version, tarball
+        except Exception:
+            return None, None
+
+    async def _run_bot_update(self) -> tuple[str, bool]:
+        """Check for and apply bot code updates.
+        Returns (status_message, whether update was applied)."""
+        import main
+        current = main.__version__
+        latest, tarball_url = await self._check_latest_version()
+        if not latest:
+            return "Could not reach GitHub API.", False
+        if latest == current:
+            return f"Already on latest version (v{current}).", False
+
+        git_dir = os.path.join(self._BOT_ROOT, ".git")
+        if os.path.isdir(git_dir):
+            proc = await asyncio.create_subprocess_exec(
+                "git", "pull",
+                cwd=self._BOT_ROOT,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                return f"git pull failed: {stdout.decode(errors='replace')[:200]}", False
+        else:
+            if not tarball_url:
+                return "No tarball URL found in release.", False
+            import aiohttp, tarfile, tempfile, shutil
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(tarball_url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                        if resp.status != 200:
+                            return f"Download failed (HTTP {resp.status}).", False
+                        tar_bytes = await resp.read()
+            except Exception as e:
+                return f"Download failed: {e}", False
+            # Extract to temp, then replace bot-owned folders/files
+            with tempfile.TemporaryDirectory() as tmp:
+                tar_path = os.path.join(tmp, "release.tar.gz")
+                with open(tar_path, "wb") as f:
+                    f.write(tar_bytes)
+                with tarfile.open(tar_path, "r:gz") as tf:
+                    tf.extractall(tmp)
+                # GitHub tarballs extract to a subfolder like "owner-repo-hash/"
+                extracted = [d for d in os.listdir(tmp) if os.path.isdir(os.path.join(tmp, d))]
+                if not extracted:
+                    return "Archive extraction failed.", False
+                src = os.path.join(tmp, extracted[0])
+                # Delete and replace bot-owned directories
+                for folder in ("core", "locales", "docs", "resources", ".github"):
+                    dest = os.path.join(self._BOT_ROOT, folder)
+                    if os.path.isdir(dest):
+                        shutil.rmtree(dest)
+                    src_folder = os.path.join(src, folder)
+                    if os.path.isdir(src_folder):
+                        shutil.copytree(src_folder, dest)
+                # Replace root files
+                for fname in ("main.py", "requirements.txt", "setup-update.sh",
+                              "README.md", "CHANGELOG.md", "env-template", ".gitignore"):
+                    src_file = os.path.join(src, fname)
+                    if os.path.isfile(src_file):
+                        shutil.copy2(src_file, os.path.join(self._BOT_ROOT, fname))
+
+        # Run pip install after code update in case requirements changed
+        pip_changes, _ = await self._run_pip_update()
+        msg = f"Updated v{current} -> v{latest}."
+        if pip_changes:
+            msg += f" Packages updated: {', '.join(pip_changes)}"
+        return msg, True
+
+    async def _notify_update_restart(self, reason: str):
+        """Send a restart notice to text channels with active voice sessions."""
+        for state in self.guild_states.values():
+            if state.vc and state.vc.is_connected() and state.text_channel:
+                try:
+                    await state.text_channel.send(reason)
+                except Exception:
+                    pass
+
+    async def _update_scheduler_loop(self):
+        """Background loop that runs auto pip/bot updates on schedule."""
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                await asyncio.sleep(300)  # check every 5 minutes
+                now = time.time()
+                tz_offset = await db.get_update_tz_offset()
+                import datetime as _dt
+                utc_now = _dt.datetime.now(_dt.timezone.utc)
+                local_now = utc_now + _dt.timedelta(hours=tz_offset)
+                current_hour = local_now.hour
+
+                pkg_enabled = await db.get_pkg_update_enabled()
+                if pkg_enabled:
+                    pkg_mode = await db.get_pkg_update_mode()
+                    if pkg_mode == "fixed":
+                        fixed_hour = await db.get_pkg_update_fixed_time()
+                        if current_hour == fixed_hour and now - self._last_pkg_update >= 3600:
+                            self._last_pkg_update = now
+                            changes, changed = await self._run_pip_update()
+                            if changed:
+                                print(f"[Auto-update] Packages updated: {', '.join(changes)}")
+                                print("[Auto-update] Restarting...")
+                                await self._notify_update_restart(t(None, "MNG_UPDATES_RESTART_NOTICE"))
+                                os._exit(0)
+                    else:
+                        interval = (await db.get_pkg_update_interval()) * 3600
+                        if now - self._last_pkg_update >= interval:
+                            self._last_pkg_update = now
+                            changes, changed = await self._run_pip_update()
+                            if changed:
+                                print(f"[Auto-update] Packages updated: {', '.join(changes)}")
+                                print("[Auto-update] Restarting...")
+                                await self._notify_update_restart(t(None, "MNG_UPDATES_RESTART_NOTICE"))
+                                os._exit(0)
+
+                bot_enabled = await db.get_bot_update_enabled()
+                if bot_enabled:
+                    bot_mode = await db.get_bot_update_mode()
+                    if bot_mode == "fixed":
+                        fixed_hour = await db.get_bot_update_fixed_time()
+                        if current_hour == fixed_hour and now - self._last_bot_update >= 3600:
+                            self._last_bot_update = now
+                            msg, updated = await self._run_bot_update()
+                            if updated:
+                                print(f"[Auto-update] {msg}")
+                                print("[Auto-update] Restarting...")
+                                await self._notify_update_restart(t(None, "MNG_UPDATES_RESTART_NOTICE"))
+                                os._exit(0)
+                            else:
+                                print(f"[Auto-update] Bot check: {msg}")
+                    else:
+                        interval = (await db.get_bot_update_interval()) * 3600
+                        if now - self._last_bot_update >= interval:
+                            self._last_bot_update = now
+                            msg, updated = await self._run_bot_update()
+                            if updated:
+                                print(f"[Auto-update] {msg}")
+                                print("[Auto-update] Restarting...")
+                                await self._notify_update_restart(t(None, "MNG_UPDATES_RESTART_NOTICE"))
+                                os._exit(0)
+                            else:
+                                print(f"[Auto-update] Bot check: {msg}")
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                print(f"[Auto-update] Error: {e}")
+                await asyncio.sleep(60)
+
+    def _start_update_scheduler(self):
+        if self._update_scheduler_task and not self._update_scheduler_task.done():
+            self._update_scheduler_task.cancel()
+        self._update_scheduler_task = self._create_task(self._update_scheduler_loop(), name="update-scheduler")
 
     @app_commands.command(**l_cmd("CMD_NAME_TIMEOUT", "CMD_DESC_TIMEOUT"))
     @app_commands.describe(
@@ -10498,7 +10703,64 @@ class MusicCog(MusicHandlers):
         ("cancel_fetches",  "OPT_MNG_CANCEL_FETCHES", False),
         ("purge_stale",     "OPT_MNG_PURGE_STALE",  False),
         ("force_resync",    "OPT_MNG_FORCE_RESYNC",  False),
+        ("updates",         "OPT_MNG_UPDATES",       False),
     ]
+
+    async def _build_updates_embed(self, ctx, view=None) -> discord.Embed:
+        import main
+        guild_id = ctx.guild_id if hasattr(ctx, "guild_id") else None
+        embed = SafeEmbed(title=t(ctx, "MNG_UPDATES_TITLE"), color=self.get_embed_color(guild_id))
+
+        pkg_enabled = await db.get_pkg_update_enabled()
+        pkg_interval = await db.get_pkg_update_interval()
+        pkg_mode = await db.get_pkg_update_mode()
+        pkg_fixed = await db.get_pkg_update_fixed_time()
+        bot_enabled = await db.get_bot_update_enabled()
+        bot_interval = await db.get_bot_update_interval()
+        bot_mode = await db.get_bot_update_mode()
+        bot_fixed = await db.get_bot_update_fixed_time()
+        tz_offset = await db.get_update_tz_offset()
+
+        # Cache for synchronous _rebuild_updates
+        if view is not None:
+            view._pkg_enabled = pkg_enabled
+            view._pkg_mode = pkg_mode
+            view._bot_enabled = bot_enabled
+            view._bot_mode = bot_mode
+            view._tz_offset = tz_offset
+
+        on = t(ctx, "MNG_UPDATES_ON")
+        off = t(ctx, "MNG_UPDATES_OFF")
+        interval_label = t(ctx, "MNG_UPDATES_MODE_INTERVAL")
+        fixed_label = t(ctx, "MNG_UPDATES_MODE_FIXED")
+        tz_sign = "+" if tz_offset >= 0 else ""
+
+        def _schedule_str(mode, interval, fixed_time):
+            if mode == "fixed":
+                return f"{fixed_label}: **{fixed_time:02d}:00**"
+            return f"{interval_label}: **{interval}h**"
+
+        embed.add_field(
+            name=t(ctx, "MNG_UPDATES_PKG_TITLE"),
+            value=f"{t(ctx, 'MNG_UPDATES_STATUS')}: **{on if pkg_enabled else off}**\n"
+                  f"{_schedule_str(pkg_mode, pkg_interval, pkg_fixed)}",
+            inline=True,
+        )
+        embed.add_field(
+            name=t(ctx, "MNG_UPDATES_BOT_TITLE"),
+            value=f"{t(ctx, 'MNG_UPDATES_STATUS')}: **{on if bot_enabled else off}**\n"
+                  f"{_schedule_str(bot_mode, bot_interval, bot_fixed)}\n"
+                  f"{t(ctx, 'MNG_UPDATES_VERSION')}: **v{main.__version__}**",
+            inline=True,
+        )
+        embed.add_field(
+            name=t(ctx, "MNG_UPDATES_TZ"),
+            value=f"UTC{tz_sign}{tz_offset}",
+            inline=True,
+        )
+        if bot_enabled:
+            embed.set_footer(text=t(ctx, "MNG_UPDATES_BOT_WARNING"))
+        return embed
 
     def _make_manage_status_view(self, ctx):
         cog = self
@@ -10517,6 +10779,12 @@ class MusicCog(MusicHandlers):
                 if not await cog.bot.is_owner(sel_interaction.user):
                     return
                 action = self.values[0]
+                if action == "updates":
+                    view = self.view
+                    embed = await cog._build_updates_embed(sel_interaction, view)
+                    view._rebuild_updates()
+                    await sel_interaction.response.edit_message(content=None, embed=embed, view=view)
+                    return
                 result = await cog._run_manage_action(sel_interaction, action)
                 embed = cog._build_manage_status_embed(sel_interaction)
                 await sel_interaction.response.edit_message(content=result, embed=embed, view=self.view)
@@ -10532,11 +10800,325 @@ class MusicCog(MusicHandlers):
                 except Exception:
                     pass
 
+        # --- Updates sub-view components ---
+
+        _TZ_OFFSETS_P0 = list(range(-12, 2))   # -12 to +1 (14 items)
+        _TZ_OFFSETS_P1 = list(range(2, 15))     # +2 to +14 (13 items)
+
+        class _UpdateInputModal(discord.ui.Modal):
+            """Modal for entering interval (1-24) or fixed time (0-23)."""
+            def __init__(self, modal_title: str, label: str, placeholder: str,
+                         lo: int, hi: int, setter, kind: str):
+                super().__init__(title=modal_title)
+                self.setter = setter
+                self.lo = lo
+                self.hi = hi
+                self.kind = kind
+                self.input_field = discord.ui.TextInput(
+                    label=label, placeholder=placeholder,
+                    min_length=1, max_length=2, required=True,
+                )
+                self.add_item(self.input_field)
+
+            async def on_submit(self, modal_interaction: discord.Interaction):
+                try:
+                    val = int(self.input_field.value)
+                except ValueError:
+                    return await modal_interaction.response.send_message(
+                        t(modal_interaction, "INVALID_INPUT"), ephemeral=True)
+                if not (self.lo <= val <= self.hi):
+                    return await modal_interaction.response.send_message(
+                        t(modal_interaction, "INVALID_INPUT"), ephemeral=True)
+                await self.setter(val)
+                view = self._view_ref
+                embed = await cog._build_updates_embed(modal_interaction, view)
+                view._rebuild_updates()
+                await modal_interaction.response.edit_message(embed=embed, view=view)
+
+        # -- Row 0: Package update buttons --
+
+        class PkgToggleButton(discord.ui.Button):
+            def __init__(self, enabled: bool):
+                label = t(ctx, "MNG_UPDATES_PKG_DISABLE" if enabled else "MNG_UPDATES_PKG_ENABLE")
+                style = discord.ButtonStyle.danger if enabled else discord.ButtonStyle.success
+                super().__init__(label=label, style=style, row=0)
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                current = await db.get_pkg_update_enabled()
+                await db.set_pkg_update_enabled(not current)
+                view = self.view
+                embed = await cog._build_updates_embed(btn_interaction, view)
+                view._rebuild_updates()
+                await btn_interaction.response.edit_message(embed=embed, view=view)
+
+        class PkgUpdateNowButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(label=t(ctx, "MNG_UPDATES_PKG_NOW"), style=discord.ButtonStyle.primary, row=0)
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                view = self.view
+                for item in view.children:
+                    item.disabled = True
+                await btn_interaction.response.edit_message(view=view)
+                changes, changed = await cog._run_pip_update()
+                if changed:
+                    msg = t(btn_interaction, "MNG_UPDATES_PKG_CHANGED", changes=", ".join(changes))
+                    try:
+                        await btn_interaction.followup.send(msg, ephemeral=True)
+                    except Exception:
+                        pass
+                    print(f"[Update] Packages updated: {', '.join(changes)}. Restarting...")
+                    await cog._notify_update_restart(t(btn_interaction, "MNG_UPDATES_RESTART_NOTICE"))
+                    os._exit(0)
+                else:
+                    embed = await cog._build_updates_embed(btn_interaction, view)
+                    view._rebuild_updates()
+                    await btn_interaction.edit_original_response(content=t(btn_interaction, "MNG_UPDATES_PKG_UPTODATE"), embed=embed, view=view)
+
+        class PkgIntervalButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(label=t(ctx, "MNG_UPDATES_SET_INTERVAL"), style=discord.ButtonStyle.secondary, row=0)
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                modal = _UpdateInputModal(
+                    modal_title=t(btn_interaction, "MNG_UPDATES_INTERVAL_TITLE"),
+                    label=t(btn_interaction, "MNG_UPDATES_INTERVAL_LABEL"),
+                    placeholder="1-24",
+                    lo=1, hi=24,
+                    setter=db.set_pkg_update_interval,
+                    kind="pkg",
+                )
+                modal._view_ref = self.view
+                await btn_interaction.response.send_modal(modal)
+
+        class PkgFixedTimeButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(label=t(ctx, "MNG_UPDATES_SET_FIXED"), style=discord.ButtonStyle.secondary, row=0)
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                modal = _UpdateInputModal(
+                    modal_title=t(btn_interaction, "MNG_UPDATES_FIXED_TITLE"),
+                    label=t(btn_interaction, "MNG_UPDATES_FIXED_LABEL"),
+                    placeholder="0-23",
+                    lo=0, hi=23,
+                    setter=db.set_pkg_update_fixed_time,
+                    kind="pkg",
+                )
+                modal._view_ref = self.view
+                await btn_interaction.response.send_modal(modal)
+
+        class PkgModeToggleButton(discord.ui.Button):
+            def __init__(self, mode: str):
+                super().__init__(label=t(ctx, "MNG_UPDATES_CHANGE_MODE"), style=discord.ButtonStyle.secondary, row=0)
+                self._current_mode = mode
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                new_mode = "fixed" if self._current_mode == "interval" else "interval"
+                await db.set_pkg_update_mode(new_mode)
+                view = self.view
+                embed = await cog._build_updates_embed(btn_interaction, view)
+                view._rebuild_updates()
+                await btn_interaction.response.edit_message(embed=embed, view=view)
+
+        # -- Row 1: Bot update buttons --
+
+        class BotToggleButton(discord.ui.Button):
+            def __init__(self, enabled: bool):
+                label = t(ctx, "MNG_UPDATES_BOT_DISABLE" if enabled else "MNG_UPDATES_BOT_ENABLE")
+                style = discord.ButtonStyle.danger if enabled else discord.ButtonStyle.success
+                super().__init__(label=label, style=style, row=1)
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                current = await db.get_bot_update_enabled()
+                await db.set_bot_update_enabled(not current)
+                if not current:
+                    cog._start_update_scheduler()
+                view = self.view
+                embed = await cog._build_updates_embed(btn_interaction, view)
+                view._rebuild_updates()
+                await btn_interaction.response.edit_message(embed=embed, view=view)
+
+        class BotUpdateNowButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(label=t(ctx, "MNG_UPDATES_BOT_NOW"), style=discord.ButtonStyle.primary, row=1)
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                view = self.view
+                for item in view.children:
+                    item.disabled = True
+                await btn_interaction.response.edit_message(view=view)
+                msg, updated = await cog._run_bot_update()
+                if updated:
+                    try:
+                        await btn_interaction.followup.send(msg, ephemeral=True)
+                    except Exception:
+                        pass
+                    print(f"[Update] {msg}. Restarting...")
+                    await cog._notify_update_restart(t(btn_interaction, "MNG_UPDATES_RESTART_NOTICE"))
+                    os._exit(0)
+                else:
+                    embed = await cog._build_updates_embed(btn_interaction, view)
+                    view._rebuild_updates()
+                    await btn_interaction.edit_original_response(content=msg, embed=embed, view=view)
+
+        class BotIntervalButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(label=t(ctx, "MNG_UPDATES_SET_INTERVAL"), style=discord.ButtonStyle.secondary, row=1)
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                modal = _UpdateInputModal(
+                    modal_title=t(btn_interaction, "MNG_UPDATES_INTERVAL_TITLE"),
+                    label=t(btn_interaction, "MNG_UPDATES_INTERVAL_LABEL"),
+                    placeholder="1-24",
+                    lo=1, hi=24,
+                    setter=db.set_bot_update_interval,
+                    kind="bot",
+                )
+                modal._view_ref = self.view
+                await btn_interaction.response.send_modal(modal)
+
+        class BotFixedTimeButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(label=t(ctx, "MNG_UPDATES_SET_FIXED"), style=discord.ButtonStyle.secondary, row=1)
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                modal = _UpdateInputModal(
+                    modal_title=t(btn_interaction, "MNG_UPDATES_FIXED_TITLE"),
+                    label=t(btn_interaction, "MNG_UPDATES_FIXED_LABEL"),
+                    placeholder="0-23",
+                    lo=0, hi=23,
+                    setter=db.set_bot_update_fixed_time,
+                    kind="bot",
+                )
+                modal._view_ref = self.view
+                await btn_interaction.response.send_modal(modal)
+
+        class BotModeToggleButton(discord.ui.Button):
+            def __init__(self, mode: str):
+                super().__init__(label=t(ctx, "MNG_UPDATES_CHANGE_MODE"), style=discord.ButtonStyle.secondary, row=1)
+                self._current_mode = mode
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                new_mode = "fixed" if self._current_mode == "interval" else "interval"
+                await db.set_bot_update_mode(new_mode)
+                view = self.view
+                embed = await cog._build_updates_embed(btn_interaction, view)
+                view._rebuild_updates()
+                await btn_interaction.response.edit_message(embed=embed, view=view)
+
+        # -- Row 2: Timezone select, Row 3: Next page, Row 4: Restart + Back --
+
+        class UpdateTzSelect(discord.ui.Select):
+            def __init__(self, *, page: int, current_tz: int = 0):
+                offsets = _TZ_OFFSETS_P0 if page == 0 else _TZ_OFFSETS_P1
+                current = current_tz
+                options = []
+                for o in offsets:
+                    label = f"UTC{o:+d}" if o != 0 else "UTC"
+                    options.append(discord.SelectOption(label=label, value=str(o), default=o == current))
+                super().__init__(placeholder=t(ctx, "TIMEZONE_PLACEHOLDER"), options=options, row=2)
+                self._page = page
+
+            async def callback(self, sel_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(sel_interaction.user): return
+                val = int(self.values[0])
+                await db.set_update_tz_offset(val)
+                view = self.view
+                view._tz_page = self._page
+                embed = await cog._build_updates_embed(sel_interaction, view)
+                view._rebuild_updates()
+                await sel_interaction.response.edit_message(embed=embed, view=view)
+
+        class TzNextPageButton(discord.ui.Button):
+            def __init__(self, current_page: int):
+                next_page = 1 - current_page
+                # Show the range of the page we'd switch to
+                other_offsets = _TZ_OFFSETS_P1 if current_page == 0 else _TZ_OFFSETS_P0
+                first = other_offsets[0]
+                last = other_offsets[-1]
+                first_s = f"UTC{first:+d}" if first != 0 else "UTC"
+                last_s = f"UTC{last:+d}" if last != 0 else "UTC"
+                label = f"{first_s} ... {last_s}"
+                super().__init__(label=label, style=discord.ButtonStyle.secondary, row=3)
+                self._next_page = next_page
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                view = self.view
+                view._tz_page = self._next_page
+                embed = await cog._build_updates_embed(btn_interaction, view)
+                view._rebuild_updates()
+                await btn_interaction.response.edit_message(embed=embed, view=view)
+
+        class RestartButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(label=t(ctx, "MNG_UPDATES_RESTART"), style=discord.ButtonStyle.danger, row=4)
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                await btn_interaction.response.edit_message(content=t(btn_interaction, "MNG_UPDATES_RESTARTING"), embed=None, view=None)
+                print("[Update] Manual restart requested.")
+                os._exit(0)
+
+        class UpdatesBackButton(discord.ui.Button):
+            def __init__(self):
+                super().__init__(style=discord.ButtonStyle.secondary, emoji="◀️", label=t(ctx, "SETTINGS_BACK"), row=4)
+
+            async def callback(self, btn_interaction: discord.Interaction):
+                if not await cog.bot.is_owner(btn_interaction.user): return
+                view = self.view
+                view._rebuild_main()
+                embed = cog._build_manage_status_embed(btn_interaction)
+                await btn_interaction.response.edit_message(content=None, embed=embed, view=view)
+
         class ManageStatusView(discord.ui.View):
             def __init__(self):
                 super().__init__(timeout=1800)
+                self._rebuild_main()
+
+            def _rebuild_main(self):
+                self.clear_items()
                 self.add_item(ManageActionSelect())
                 self.add_item(ManageRefreshButton())
+
+            def _rebuild_updates(self):
+                self.clear_items()
+                # Row 0: Package update buttons
+                self.add_item(PkgToggleButton(self._pkg_enabled))
+                self.add_item(PkgUpdateNowButton())
+                self.add_item(PkgIntervalButton())
+                self.add_item(PkgFixedTimeButton())
+                self.add_item(PkgModeToggleButton(self._pkg_mode))
+                # Row 1: Bot update buttons
+                self.add_item(BotToggleButton(self._bot_enabled))
+                self.add_item(BotUpdateNowButton())
+                self.add_item(BotIntervalButton())
+                self.add_item(BotFixedTimeButton())
+                self.add_item(BotModeToggleButton(self._bot_mode))
+                # Row 2: Timezone select
+                self.add_item(UpdateTzSelect(page=self._tz_page, current_tz=self._tz_offset))
+                # Row 3: Timezone page switch
+                self.add_item(TzNextPageButton(self._tz_page))
+                # Row 4: Restart + Back
+                self.add_item(RestartButton())
+                self.add_item(UpdatesBackButton())
+
+            _pkg_enabled: bool = False
+            _pkg_mode: str = "interval"
+            _bot_enabled: bool = False
+            _bot_mode: str = "interval"
+            _tz_page: int = 0
+            _tz_offset: int = 0
 
         return ManageStatusView()
 
@@ -10624,11 +11206,14 @@ class MusicCog(MusicHandlers):
     async def cog_load(self):
         await super().cog_load()
         self._wal_checkpoint_task.start()
+        self._start_update_scheduler()
 
     async def cog_unload(self):
         self._wal_checkpoint_task.cancel()
         if self._activity_cycle_task and not self._activity_cycle_task.done():
             self._activity_cycle_task.cancel()
+        if self._update_scheduler_task and not self._update_scheduler_task.done():
+            self._update_scheduler_task.cancel()
         for session in self.radio_sessions.values():
             session.active = False
             if session._timeout_task and not session._timeout_task.done():

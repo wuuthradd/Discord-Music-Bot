@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator
 from urllib.parse import urlparse
 
-from locales.localization import t
+from core.localization import t
 
 _log = logging.getLogger(__name__)
 

@@ -3,3 +3,4 @@ yt-dlp[default]
 python-dotenv
 aiosqlite
 psutil
+spotapi

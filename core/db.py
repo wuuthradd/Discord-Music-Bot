@@ -6,7 +6,8 @@ from typing import Any, Callable
 
 import aiosqlite
 
-DB_PATH = (Path(__file__).parent / "data.db").resolve()
+DB_DIR = (Path(__file__).resolve().parent.parent / "db")
+DB_PATH = DB_DIR / "data.db"
 
 
 class Database:
@@ -25,6 +26,7 @@ class Database:
             if self._initialized and self._conn:
                 return
             try:
+                self.db_path.parent.mkdir(exist_ok=True)
                 self._conn = await aiosqlite.connect(self.db_path)
                 await self._conn._execute(setattr, self._conn._conn, "isolation_level", None)
                 await self._conn.execute("PRAGMA journal_mode=WAL;")
@@ -82,7 +84,16 @@ class Database:
                         vote_exclude_deafened INTEGER DEFAULT 1,
                         live_enabled INTEGER DEFAULT 0,
                         live_permission TEXT DEFAULT 'admin',
-                        live_max_hours INTEGER DEFAULT 1
+                        live_max_hours INTEGER DEFAULT 1,
+                        pkg_update_enabled INTEGER DEFAULT 0,
+                        pkg_update_interval INTEGER DEFAULT 24,
+                        pkg_update_mode TEXT DEFAULT 'interval',
+                        pkg_update_fixed_time INTEGER DEFAULT 0,
+                        bot_update_enabled INTEGER DEFAULT 0,
+                        bot_update_interval INTEGER DEFAULT 24,
+                        bot_update_mode TEXT DEFAULT 'interval',
+                        bot_update_fixed_time INTEGER DEFAULT 0,
+                        update_tz_offset INTEGER DEFAULT 0
                     )
                     """
                 )
@@ -216,6 +227,19 @@ class Database:
 
                 # Migrate old 'np' view_type to 'mp'
                 await self._conn.execute("UPDATE active_views SET view_type='mp' WHERE view_type='np'")
+
+                # Add update settings columns if missing
+                for col, col_type, default in (
+                    ("pkg_update_enabled", "INTEGER", "0"), ("pkg_update_interval", "INTEGER", "24"),
+                    ("pkg_update_mode", "TEXT", "'interval'"), ("pkg_update_fixed_time", "INTEGER", "0"),
+                    ("bot_update_enabled", "INTEGER", "0"), ("bot_update_interval", "INTEGER", "24"),
+                    ("bot_update_mode", "TEXT", "'interval'"), ("bot_update_fixed_time", "INTEGER", "0"),
+                    ("update_tz_offset", "INTEGER", "0"),
+                ):
+                    try:
+                        await self._conn.execute(f"ALTER TABLE guild_settings ADD COLUMN {col} {col_type} DEFAULT {default}")
+                    except Exception:
+                        pass
 
                 await self._conn.commit()
                 self._initialized = True
@@ -681,6 +705,62 @@ class Database:
 
     async def set_max_workers(self, value: int):
         await self._upsert(0, "max_workers", value)
+
+    # -- update settings --
+
+    async def get_pkg_update_enabled(self) -> bool:
+        return await self._get_global("pkg_update_enabled", lambda v: bool(int(v)), False)
+
+    async def set_pkg_update_enabled(self, value: bool):
+        await self._upsert(0, "pkg_update_enabled", int(value))
+
+    async def get_pkg_update_interval(self) -> int:
+        return await self._get_global("pkg_update_interval", int, 24)
+
+    async def set_pkg_update_interval(self, value: int):
+        await self._upsert(0, "pkg_update_interval", value)
+
+    async def get_pkg_update_mode(self) -> str:
+        return await self._get_global("pkg_update_mode", str, "interval")
+
+    async def set_pkg_update_mode(self, value: str):
+        await self._upsert(0, "pkg_update_mode", value)
+
+    async def get_pkg_update_fixed_time(self) -> int:
+        return await self._get_global("pkg_update_fixed_time", int, 0)
+
+    async def set_pkg_update_fixed_time(self, value: int):
+        await self._upsert(0, "pkg_update_fixed_time", value)
+
+    async def get_bot_update_enabled(self) -> bool:
+        return await self._get_global("bot_update_enabled", lambda v: bool(int(v)), False)
+
+    async def set_bot_update_enabled(self, value: bool):
+        await self._upsert(0, "bot_update_enabled", int(value))
+
+    async def get_bot_update_interval(self) -> int:
+        return await self._get_global("bot_update_interval", int, 24)
+
+    async def set_bot_update_interval(self, value: int):
+        await self._upsert(0, "bot_update_interval", value)
+
+    async def get_bot_update_mode(self) -> str:
+        return await self._get_global("bot_update_mode", str, "interval")
+
+    async def set_bot_update_mode(self, value: str):
+        await self._upsert(0, "bot_update_mode", value)
+
+    async def get_bot_update_fixed_time(self) -> int:
+        return await self._get_global("bot_update_fixed_time", int, 0)
+
+    async def set_bot_update_fixed_time(self, value: int):
+        await self._upsert(0, "bot_update_fixed_time", value)
+
+    async def get_update_tz_offset(self) -> int:
+        return await self._get_global("update_tz_offset", int, 0)
+
+    async def set_update_tz_offset(self, value: int):
+        await self._upsert(0, "update_tz_offset", value)
 
     # -- pause timeout behavior --
 
@@ -1329,10 +1409,19 @@ class Database:
         result["prefetch"] = int(await self.get_prefetch())
         result["safe_prefetch"] = int(await self.get_safe_prefetch())
         result["silent_log"] = int(await self.get_silent_log())
+        result["pkg_update_enabled"] = int(await self.get_pkg_update_enabled())
+        result["pkg_update_interval"] = await self.get_pkg_update_interval()
+        result["pkg_update_mode"] = await self.get_pkg_update_mode()
+        result["pkg_update_fixed_time"] = await self.get_pkg_update_fixed_time()
+        result["bot_update_enabled"] = int(await self.get_bot_update_enabled())
+        result["bot_update_interval"] = await self.get_bot_update_interval()
+        result["bot_update_mode"] = await self.get_bot_update_mode()
+        result["bot_update_fixed_time"] = await self.get_bot_update_fixed_time()
+        result["update_tz_offset"] = await self.get_update_tz_offset()
         return result
 
     _IMPORT_ALIASES: dict[str, str] = {"ytdlp_silent": "silent_log"}
-    _IMPORT_SKIP_KEYS: set[str] = {"bot_activity", "bot_activity_list", "max_workers", "prefetch", "safe_prefetch", "silent_log"}
+    _IMPORT_SKIP_KEYS: set[str] = {"bot_activity", "bot_activity_list", "max_workers", "prefetch", "safe_prefetch", "silent_log", "pkg_update_enabled", "pkg_update_interval", "pkg_update_mode", "pkg_update_fixed_time", "bot_update_enabled", "bot_update_interval", "bot_update_mode", "bot_update_fixed_time", "update_tz_offset"}
     _IMPORT_GUILD_SPECIFIC_KEYS: set[str] = {"view_channel", "dj_role_id"}
 
     _IMPORT_VALID_ENUMS: dict[str, set[str]] = {
@@ -1493,31 +1582,34 @@ class Database:
                         "UPDATE bot_activity SET activity_selected = MIN(activity_selected, ?) WHERE id=1",
                         (max(0, len(activity_rows) - 1),),
                     )
-            for gkey in ("max_workers", "prefetch", "safe_prefetch", "silent_log"):
+            _BOT_INT_KEYS = {"max_workers": (1, 32), "pkg_update_interval": (1, 168), "bot_update_interval": (1, 168), "pkg_update_fixed_time": (0, 23), "bot_update_fixed_time": (0, 23), "update_tz_offset": (-12, 14)}
+            _BOT_BOOL_KEYS = {"prefetch", "safe_prefetch", "silent_log", "pkg_update_enabled", "bot_update_enabled"}
+            _BOT_ENUM_KEYS = {"pkg_update_mode": {"interval", "fixed"}, "bot_update_mode": {"interval", "fixed"}}
+            for gkey in (*_BOT_INT_KEYS, *_BOT_BOOL_KEYS, *_BOT_ENUM_KEYS):
                 if gkey not in data:
                     continue
                 raw = data[gkey]
-                if gkey == "max_workers":
+                if gkey in _BOT_INT_KEYS:
                     try:
                         val = int(raw)
                     except (ValueError, TypeError):
                         continue
-                    val = max(1, min(32, val))
-                    await self._conn.execute(
-                        "INSERT INTO guild_settings (guild_id, max_workers) VALUES (0, ?) "
-                        "ON CONFLICT(guild_id) DO UPDATE SET max_workers=excluded.max_workers",
-                        (val,),
-                    )
+                    lo, hi = _BOT_INT_KEYS[gkey]
+                    val = max(lo, min(hi, val))
+                elif gkey in _BOT_ENUM_KEYS:
+                    if not isinstance(raw, str) or raw not in _BOT_ENUM_KEYS[gkey]:
+                        continue
+                    val = raw
                 else:
                     try:
                         val = int(bool(int(raw)))
                     except (ValueError, TypeError):
                         continue
-                    await self._conn.execute(
-                        f"INSERT INTO guild_settings (guild_id, {gkey}) VALUES (0, ?) "
-                        f"ON CONFLICT(guild_id) DO UPDATE SET {gkey}=excluded.{gkey}",
-                        (val,),
-                    )
+                await self._conn.execute(
+                    f"INSERT INTO guild_settings (guild_id, {gkey}) VALUES (0, ?) "
+                    f"ON CONFLICT(guild_id) DO UPDATE SET {gkey}=excluded.{gkey}",
+                    (val,),
+                )
 
     async def reset_bot_settings(self):
         await self._ensure_init()
@@ -1531,9 +1623,13 @@ class Database:
                 "activity_interval=120, activity_selected=0"
             )
             await self._conn.execute(
-                "INSERT INTO guild_settings (guild_id, silent_log, prefetch, safe_prefetch, max_workers) "
-                "VALUES (0, 0, 1, 1, 16) ON CONFLICT(guild_id) DO UPDATE SET "
-                "silent_log=0, prefetch=1, safe_prefetch=1, max_workers=16"
+                "INSERT INTO guild_settings (guild_id, silent_log, prefetch, safe_prefetch, max_workers, "
+                "pkg_update_enabled, pkg_update_interval, pkg_update_mode, pkg_update_fixed_time, "
+                "bot_update_enabled, bot_update_interval, bot_update_mode, bot_update_fixed_time, update_tz_offset) "
+                "VALUES (0, 0, 1, 1, 16, 0, 24, 'interval', 0, 0, 24, 'interval', 0, 0) ON CONFLICT(guild_id) DO UPDATE SET "
+                "silent_log=0, prefetch=1, safe_prefetch=1, max_workers=16, "
+                "pkg_update_enabled=0, pkg_update_interval=24, pkg_update_mode='interval', pkg_update_fixed_time=0, "
+                "bot_update_enabled=0, bot_update_interval=24, bot_update_mode='interval', bot_update_fixed_time=0, update_tz_offset=0"
             )
 
     async def delete_guild_data(self, guild_id: int):

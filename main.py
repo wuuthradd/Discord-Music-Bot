@@ -1,3 +1,5 @@
+__version__ = "1.1.0"
+
 import asyncio
 import os
 import hashlib
@@ -21,7 +23,7 @@ class MusicBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned, intents=intents, max_messages=0)
 
     async def setup_hook(self):
-        from locales.localization import BaseTranslator
+        from core.localization import BaseTranslator
         from core.music_cog import _PersistentMPButton, _PersistentQueueButton
         await self.tree.set_translator(BaseTranslator())
         self.add_dynamic_items(_PersistentMPButton, _PersistentQueueButton)
@@ -31,10 +33,10 @@ class MusicBot(commands.Bot):
                 cmd.guild_only = True
         await self._sync_if_changed()
 
-    _TREE_HASH_FILE = Path(__file__).parent / "resources" / ".tree_hash"
+    _TREE_HASH_FILE = Path(__file__).parent / "db" / ".tree_hash"
 
     async def _sync_if_changed(self):
-        from locales.localization import _strings
+        from core.localization import _strings
         payload = self.tree.get_commands()
         h = hashlib.sha256(json.dumps([c.to_dict(self.tree) for c in payload], sort_keys=True).encode())
         h.update(json.dumps(_strings, sort_keys=True).encode())
@@ -58,7 +60,7 @@ class MusicBot(commands.Bot):
             print(f"[warn] Could not write tree hash file: {e}")
 
     async def close(self):
-        from db.db import db
+        from core.db import db
         try:
             cog = self.cogs.get("MusicCog")
             pending = []

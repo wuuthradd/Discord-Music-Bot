@@ -24,7 +24,6 @@ The script will:
 - Validate your bot token
 - Create `.env` from the template and clear the template keys
 - Create a virtual environment and install all dependencies
-- Fetch and install SpotAPI from GitHub
 - Generate `run_bot.sh`
 
 To update dependencies later, run the same script again.
@@ -65,14 +64,7 @@ This installs:
 | `python-dotenv` | `.env` file loading |
 | `aiosqlite` | Async SQLite database |
 | `psutil` | RAM/CPU monitoring in `/manage` |
-
-You also need [SpotAPI](https://github.com/Aran404/SpotAPI) for Spotify support:
-
-```bash
-git clone https://github.com/Aran404/SpotAPI.git /tmp/SpotAPI
-pip install /tmp/SpotAPI
-rm -rf /tmp/SpotAPI
-```
+| `spotapi` | Spotify track/playlist/album resolution |
 
 ### 4. Install FFmpeg
 
@@ -158,11 +150,42 @@ The bot resolves Spotify tracks by searching YouTube for the best matching resul
 To play age-restricted YouTube content, provide a Netscape-format cookie file:
 
 1. Export cookies from a logged-in YouTube session using a browser extension (e.g., "Get cookies.txt LOCALLY").
-2. Place the file at `resources/cookies.txt` (the default path), or set the `YTDLP_COOKIE_FILE` environment variable to a custom path.
+2. Place the file at `db/cookies.txt` (the default path) or set the `YTDLP_COOKIE_FILE` environment variable to a custom path.
 
 > **Note:** The bot creates temporary copies of the cookie file for each yt-dlp operation to ensure thread safety. The original file is never modified.
 
 > **Cookies expire.** If age-restricted content stops working, export fresh cookies from your browser and replace the file. Use a throwaway Google account, not your personal one as YouTube may flag or ban the account.
+
+---
+
+## Auto-Updates
+
+The bot has a built-in auto-update system that can automatically update both **pip packages** and the **bot code** itself. Configure it from the `/manage` command by selecting **Auto-update settings** from the dropdown.
+
+### What it does
+
+- **Package updates** - Runs `pip install --upgrade -r requirements.txt` on schedule and restarts if any package version changed.
+- **Bot code updates** - Checks GitHub for a new release. If found, pulls the latest code via `git pull` (for git clones) or downloads and extracts the release tarball (for ZIP installs), then restarts.
+
+### Schedule modes
+
+- **Interval** - Run every N hours (1-24).
+- **Fixed time** - Run once daily at a specific hour (0-23) in your configured timezone.
+
+### Process manager required
+
+The bot restarts by exiting cleanly after applying updates. **You need a process manager** that automatically restarts the bot when it exits. Any of these work:
+
+- **systemd**
+- **pm2** (`pm2 start run_bot.sh --name music-bot`)
+- **supervisord**
+- screen/tmux or custom shell
+
+Without a process manager bot will just stop after an update and won't come back.
+
+### Restart notifications
+
+When the bot restarts for an update, it sends a notification message to the text channel of any guild where it has an active voice connection, so users know why playback was interrupted.
 
 ---
 
@@ -201,4 +224,4 @@ This is usually a network issue. The bot uses FFmpeg reconnect options with up t
 
 ### Command sync seems stuck
 
-The bot hashes the command tree and only syncs when it changes. The hash is stored in `resources/.tree_hash`. To force a re-sync, use `/manage` resync or delete the hash file and restart.
+The bot hashes the command tree and only syncs when it changes. The hash is stored in `db/.tree_hash`. To force a re-sync, use `/manage` resync or delete the hash file and restart.
