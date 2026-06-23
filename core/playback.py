@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
+import sys
 
 import time
 import traceback
@@ -45,6 +47,7 @@ from core.media import (
     _run_ydl_info,
     _ydl_options,
     StaleCookieError,
+    BotDetectionError,
     JSRuntimeError,
     has_valid_cookies,
 )
@@ -64,6 +67,7 @@ class GuildMusicState:
         self.suppress_after_callback = False
         self.delete_after: int | None = 5
         self.age_restricted_skips: int = 0
+        self.bot_detection_skips: int = 0
         self._looped_ref: dict | None = None
         self.playing_since: float | None = None
         self.paused_at: float | None = None
@@ -288,20 +292,34 @@ class PlaybackManager:
             state.idle_disconnect_task = task
 
     async def _report_skipped(self, state: GuildMusicState, text_channel) -> bool:
-        """Reports age-restricted skips accumulated during playlist playback. Returns True if any were reported."""
-        if not state.age_restricted_skips or not text_channel:
-            state.age_restricted_skips = 0
-            return False
+        """Reports age-restricted / bot-detection skips accumulated during playlist playback. Returns True if any were reported."""
+        reported = False
 
-        msg = t(text_channel, "SKIPPED_AGE_RESTRICTED", count=state.age_restricted_skips)
-        key = "YTDLP_COOKIE_STALE" if has_valid_cookies() else "YTDLP_AGE_RESTRICTED"
-        msg += "\n\n" + t(text_channel, key)
-        state.age_restricted_skips = 0
-        try:
-            await text_channel.send(msg, delete_after=state.effective_delete_after)
-        except Exception:
-            pass
-        return True
+        if state.bot_detection_skips and text_channel:
+            msg = t(text_channel, "SKIPPED_BOT_DETECTION", count=state.bot_detection_skips)
+            msg += "\n\n" + t(text_channel, "YTDLP_COOKIE_STALE")
+            state.bot_detection_skips = 0
+            try:
+                await text_channel.send(msg, delete_after=state.effective_delete_after)
+            except Exception:
+                pass
+            reported = True
+
+        if state.age_restricted_skips and text_channel:
+            msg = t(text_channel, "SKIPPED_AGE_RESTRICTED", count=state.age_restricted_skips)
+            key = "YTDLP_COOKIE_STALE" if has_valid_cookies() else "YTDLP_AGE_RESTRICTED"
+            msg += "\n\n" + t(text_channel, key)
+            state.age_restricted_skips = 0
+            try:
+                await text_channel.send(msg, delete_after=state.effective_delete_after)
+            except Exception:
+                pass
+            reported = True
+
+        if not reported:
+            state.age_restricted_skips = 0
+            state.bot_detection_skips = 0
+        return reported
 
     def _select_next_entry(self, state: GuildMusicState, guild_id: int, *, failed: bool = False) -> dict | None:
         loop_mode = state.loop_mode
@@ -384,7 +402,7 @@ class PlaybackManager:
         elif source == "url":
             await self._hydrate_url_entry(entry, guild_id)
 
-    _STREAM_KEYS = ("title", "uploader", "channel", "duration", "thumbnail", "view_count", "webpage_url", "id", "is_live")
+    _STREAM_KEYS = ("title", "uploader", "channel", "duration", "thumbnail", "view_count", "webpage_url", "id", "is_live", "extractor")
 
     async def _ensure_stream_url(self, entry: dict, guild_id: int):
         url = entry.get("url")
@@ -445,6 +463,23 @@ class PlaybackManager:
             seek_prefix = f"-ss {seek_time} "
 
         silent = self.is_silent_log(guild_id)
+        url = entry["url"]
+        webpage_url = entry.get("webpage_url")
+        # Extractors that require TLS fingerprinting / auth that FFmpeg can't provide
+        _PIPE_EXTRACTORS = {"TikTok", "TikTokLive"}
+        extractor = entry.get("extractor") or ""
+
+        if extractor in _PIPE_EXTRACTORS and webpage_url:
+            return await self._build_piped_source(webpage_url, seek_prefix, silent)
+
+        codec = "copy"
+        try:
+            codec, _ = await asyncio.wait_for(
+                discord.FFmpegOpusAudio.probe(url), timeout=10
+            )
+        except (asyncio.TimeoutError, Exception):
+            pass
+
         before = (
             f"{seek_prefix}"
             f"-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 "
@@ -458,13 +493,39 @@ class PlaybackManager:
         if silent:
             opts["options"] = "-loglevel quiet"
 
-        try:
-            codec, _ = await asyncio.wait_for(
-                discord.FFmpegOpusAudio.probe(entry["url"]), timeout=10
-            )
-        except (asyncio.TimeoutError, Exception):
-            codec = "copy"
-        return discord.FFmpegOpusAudio(entry["url"], codec=codec, bitrate=128, **opts)
+        return discord.FFmpegOpusAudio(url, codec=codec, bitrate=128, **opts)
+
+    async def _build_piped_source(self, webpage_url: str, seek_prefix: str, silent: bool) -> discord.FFmpegOpusAudio:
+        """Build an audio source by piping yt-dlp stdout into FFmpeg stdin."""
+        from core.media import YTDLP_COOKIE_FILE
+        cmd = [sys.executable, "-m", "yt_dlp", "-f", "ba/b", "-o", "-", "-q", "--no-playlist", webpage_url]
+        if YTDLP_COOKIE_FILE:
+            cmd[5:5] = ["--cookies", YTDLP_COOKIE_FILE]
+        ytdlp_proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+
+        before = (
+            f"{seek_prefix}"
+            f"-probesize 131072 -analyzeduration 131072 "
+            f"-nostdin"
+        )
+
+        opts = {"before_options": before}
+        if silent:
+            opts["options"] = "-loglevel quiet"
+
+        source = discord.FFmpegOpusAudio(ytdlp_proc.stdout, codec=None, bitrate=128,
+                                         pipe=True, **opts)
+        _original_kill = source._kill_process
+        def _kill_with_ytdlp():
+            _original_kill()
+            try:
+                ytdlp_proc.kill()
+            except Exception:
+                pass
+        source._kill_process = _kill_with_ytdlp
+        return source
 
     def _guild_lock(self, guild_id: int) -> asyncio.Lock:
         lock = self._play_locks.get(guild_id)
@@ -569,7 +630,7 @@ class PlaybackManager:
                     if next_entry.get("source") in ("spotify", "url"):
                         try:
                             await self._hydrate_entry(next_entry, guild_id)
-                        except StaleCookieError:
+                        except (StaleCookieError, BotDetectionError):
                             raise
                         except Exception as e:
                             label = "Spotify" if next_entry.get("source") == "spotify" else "URL"
@@ -579,6 +640,10 @@ class PlaybackManager:
                             continue
 
                     await self._ensure_stream_url(next_entry, guild_id)
+                except BotDetectionError:
+                    state.bot_detection_skips += 1
+                    self._unloop_failed(state)
+                    continue
                 except StaleCookieError:
                     state.age_restricted_skips += 1
                     self._unloop_failed(state)

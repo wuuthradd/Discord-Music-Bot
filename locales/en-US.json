@@ -875,6 +875,7 @@
   "SHUFFLE_RANGE_VOTE": "🗳️ Vote to shuffle tracks {from_pos}-{to_pos} recorded.",
   "SHUFFLE_VOTE": "🗳️ Vote to shuffle recorded.",
   "SKIPPED_AGE_RESTRICTED": "⚠️ {count} track(s) skipped (age-restricted).",
+  "SKIPPED_BOT_DETECTION": "⚠️ {count} track(s) skipped (bot detection).",
   "SKIPPED_DELETED": "⚠️ {count} track(s) skipped (removed from YouTube).",
   "SKIPPED_MEMBERS_ONLY": "⚠️ {count} track(s) skipped (members-only).",
   "SKIPPED_PRIVATE": "⚠️ {count} track(s) skipped (private).",

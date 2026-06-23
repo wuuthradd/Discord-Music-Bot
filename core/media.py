@@ -58,29 +58,41 @@ def set_max_workers(n: int):
 
 
 class StaleCookieError(Exception):
-    """Raised when yt-dlp fails in a way that indicates expired/stale cookies."""
+    """Raised when yt-dlp fails due to age-restricted content requiring cookies."""
+
+
+class BotDetectionError(Exception):
+    """Raised when yt-dlp fails due to bot detection / sign-in requirements."""
 
 
 class JSRuntimeError(Exception):
     """Raised when yt-dlp fails due to a missing or broken JavaScript runtime."""
 
 
-_COOKIE_ERROR_HINTS = (
-    "sign in",
-    "not a bot",
-    "bot detection",
+_AGE_ERROR_HINTS = (
     "confirm your age",
     "verify your age",
     "age-restricted",
     "age_verification",
     "age gate",
+)
+
+_BOT_ERROR_HINTS = (
+    "sign in",
+    "not a bot",
+    "bot detection",
     "login required",
 )
 
 
 def _is_cookie_error(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return any(hint in msg for hint in _COOKIE_ERROR_HINTS)
+    return any(hint in msg for hint in _AGE_ERROR_HINTS)
+
+
+def _is_bot_detection_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(hint in msg for hint in _BOT_ERROR_HINTS)
 
 
 _JS_RUNTIME_HINTS = (
@@ -349,6 +361,8 @@ async def _run_ydl_info(target: str, options: dict) -> dict:
     except asyncio.TimeoutError:
         raise ValueError("Extraction timed out (180s)")
     except Exception as e:
+        if _is_bot_detection_error(e):
+            raise BotDetectionError(str(e)) from e
         if _is_cookie_error(e):
             raise StaleCookieError(str(e)) from e
         if _is_js_runtime_error(e):
@@ -358,7 +372,14 @@ async def _run_ydl_info(target: str, options: dict) -> dict:
         reason = cap_logger.last_error
         if reason:
             cleaned = _YTDLP_ERROR_PREFIX.sub("", _ANSI_ESCAPE.sub("", reason)).strip()
-            raise ValueError(cleaned or reason)
+            err = ValueError(cleaned or reason)
+            if _is_bot_detection_error(err):
+                raise BotDetectionError(str(err)) from err
+            if _is_cookie_error(err):
+                raise StaleCookieError(str(err)) from err
+            if _is_js_runtime_error(err):
+                raise JSRuntimeError(str(err)) from err
+            raise err
         raise ValueError(f"yt-dlp returned no info for: {target}")
     return result
 
@@ -426,7 +447,7 @@ async def extract_entries(query: str, *, silent: bool = False, playlistend: int 
 
     try:
         info = await _run_ydl_info(prepared_query, ydl_opts)
-    except (StaleCookieError, JSRuntimeError):
+    except (StaleCookieError, BotDetectionError, JSRuntimeError):
         raise
     except Exception as e:
         print(t(None, "EXTRACT_ERR", error=e))
@@ -460,7 +481,7 @@ async def extract_entries_from(query: str, *, silent: bool = False, playliststar
 
     try:
         info = await _run_ydl_info(prepared_query, ydl_opts)
-    except (StaleCookieError, JSRuntimeError):
+    except (StaleCookieError, BotDetectionError, JSRuntimeError):
         raise
     except Exception as e:
         print(t(None, "EXTRACT_ERR", error=e))

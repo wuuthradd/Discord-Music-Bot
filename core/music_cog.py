@@ -29,6 +29,7 @@ from core.media import (
     is_youtube_url,
     looks_like_url,
     StaleCookieError,
+    BotDetectionError,
     JSRuntimeError,
     has_valid_cookies,
     has_js_runtime,
@@ -2642,6 +2643,8 @@ class MusicCog(MusicHandlers):
         except SpotifyError as e:
             print(f"[Spotify error] {e}")
             return await respond_fn(t(interaction, "SPOTIFY_ERROR"))
+        except BotDetectionError:
+            return await respond_fn(t(interaction, "YTDLP_COOKIE_STALE"))
         except StaleCookieError:
             key = "YTDLP_COOKIE_STALE" if has_valid_cookies() else "YTDLP_AGE_RESTRICTED"
             return await respond_fn(
@@ -3459,6 +3462,9 @@ class MusicCog(MusicHandlers):
 
         try:
             entries = await extract_entries(f"ytsearch10:{query}", silent=self.is_silent_log(interaction.guild.id))
+        except BotDetectionError:
+            return await self.send_reply(interaction,
+                t(interaction, "YTDLP_COOKIE_STALE"), ephemeral=True)
         except StaleCookieError:
             key = "YTDLP_COOKIE_STALE" if has_valid_cookies() else "YTDLP_AGE_RESTRICTED"
             return await self.send_reply(interaction,

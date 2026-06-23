@@ -875,6 +875,7 @@
   "SHUFFLE_RANGE_VOTE": "🗳️ {from_pos}-{to_pos} arası parçaların karıştırılması için oy verildi.",
   "SHUFFLE_VOTE": "🗳️ Listenin karıştırılması için oy verildi.",
   "SKIPPED_AGE_RESTRICTED": "⚠️ {count} parça atlandı (yaş kısıtlaması).",
+  "SKIPPED_BOT_DETECTION": "⚠️ {count} parça atlandı (bot algılaması).",
   "SKIPPED_DELETED": "⚠️ {count} parça atlandı (YouTube'dan kaldırılmış).",
   "SKIPPED_MEMBERS_ONLY": "⚠️ {count} parça atlandı (üyelere özel).",
   "SKIPPED_PRIVATE": "⚠️ {count} parça atlandı (gizli video).",

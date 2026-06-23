@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.1
+
+- Added yt-dlp piped extraction for sources that needs it (TikTok).
+- Separated bot detection errors from age restricted errors.
+
 ## v1.1.0
 
 - Auto-update system for pip packages and bot code via `/manage`.
