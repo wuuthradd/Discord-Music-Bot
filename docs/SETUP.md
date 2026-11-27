@@ -5,6 +5,7 @@
 - **Python 3.10+**
 - **FFmpeg** - Must be installed and available in PATH.
 - **A JavaScript runtime** - One of: `deno` (recommended), `node`, `quickjs`, or `quickjs-ng`. Required by yt-dlp for YouTube content extraction.
+- **Docker** - Used only when it is already installed. The setup script then starts the YouTube PO token provider. The bot still runs without Docker.
 
 ---
 
@@ -24,9 +25,10 @@ The script will:
 - Validate your bot token
 - Create `.env` from the template and clear the template keys
 - Create a virtual environment and install all dependencies
+- Start or update the YouTube PO token provider when Docker is available
 - Generate `run_bot.sh`
 
-To update dependencies later, run the same script again.
+To update dependencies later, run the same script again. That run also checks the provider and recreates it when the image, port, or running state does not match.
 
 ---
 
@@ -60,11 +62,12 @@ This installs:
 | Package | Purpose |
 |---|---|
 | `discord.py[voice]` | Discord API + voice support (includes PyNaCl) |
-| `yt-dlp[default]` | source audio extraction |
+| `yt-dlp[default,curl-cffi]` | source audio extraction, including browser impersonation |
 | `python-dotenv` | `.env` file loading |
 | `aiosqlite` | Async SQLite database |
 | `psutil` | RAM/CPU monitoring in `/manage` |
 | `spotapi` | Spotify track/playlist/album resolution |
+| `bgutil-ytdlp-pot-provider` | yt-dlp plugin that fetches a YouTube PO token from the local provider |
 
 ### 4. Install FFmpeg
 
@@ -158,14 +161,37 @@ To play age-restricted YouTube content, provide a Netscape-format cookie file:
 
 ---
 
+## YouTube PO Token Provider
+
+The bot does not generate a PO token and does not pass one to yt-dlp. The `bgutil-ytdlp-pot-provider` package installed with the other Python dependencies is only the plugin. yt-dlp loads that plugin and, when a YouTube request needs a token, asks the provider service at `http://127.0.0.1:4416`. That address is the plugin's default. This project does not set a different URL.
+
+The service is a separate program. It is the Docker image `brainicism/bgutil-ytdlp-pot-provider`, published only on the host's IPv4 loopback. `setup-update.sh` checks for Docker and uses it when the daemon answers:
+
+- It reads the installed plugin version and pulls that image tag. The plain `2.0.2` tag is the Node.js image. If that tag is missing, it pulls `latest`.
+- It starts a container named `bgutil-provider` with `--init`, `--restart unless-stopped`, and `-p 127.0.0.1:4416:4416`.
+- On a later setup or update, it pulls again. It leaves the container alone when the image, loopback port, init process, restart policy, and running state already match. Otherwise it replaces the container.
+
+Without Docker, setup still finishes and prints a warning. YouTube playback then depends on clients that do not ask for a token. Install Docker and run `./setup-update.sh` again to start the provider.
+
+The same check runs from `/manage` when a package update or a bot update runs, including the scheduled ones. It calls `./setup-update.sh --bgutil-only`, which does not touch the virtualenv or `.env`.
+
+A manual start, if you are not using the script:
+
+```bash
+docker run --name bgutil-provider -d --init --restart unless-stopped \
+  -p 127.0.0.1:4416:4416 brainicism/bgutil-ytdlp-pot-provider
+```
+
+---
+
 ## Auto-Updates
 
 The bot has a built-in auto-update system that can automatically update both **pip packages** and the **bot code** itself. Configure it from the `/manage` command by selecting **Auto-update settings** from the dropdown.
 
 ### What it does
 
-- **Package updates** - Runs `pip install --upgrade -r requirements.txt` on schedule and restarts if any package version changed.
-- **Bot code updates** - Checks GitHub for a new release. If found, pulls the latest code via `git pull` (for git clones) or downloads and extracts the release tarball (for ZIP installs), then restarts.
+- **Package updates** - Runs `pip install --upgrade -r requirements.txt` on schedule and restarts if any package version changed. Each check also refreshes the YouTube PO token provider.
+- **Bot code updates** - Checks GitHub for a new release. If found, pulls the latest code via `git pull` (for git clones) or downloads and extracts the release tarball (for ZIP installs), then restarts. Each check also refreshes the YouTube PO token provider.
 
 ### Schedule modes
 
@@ -177,7 +203,7 @@ The bot has a built-in auto-update system that can automatically update both **p
 The bot restarts by exiting cleanly after applying updates. **You need a process manager** that automatically restarts the bot when it exits. Any of these work:
 
 - **systemd**
-- **pm2** (`pm2 start run_bot.sh --name music-bot`)
+- **pm2** (`pm2 start run_bot.sh --name music-bot`). `run_bot.sh` clears `NODE_CHANNEL_FD` and `NODE_CHANNEL_SERIALIZATION_MODE` before Python starts. pm2 exports those for its own IPC, and Deno then rejects yt-dlp's JavaScript challenge solver with `fd is not from BiPipe`. The unset does nothing when those variables are absent.
 - **supervisord**
 - screen/tmux or custom shell
 
@@ -204,6 +230,10 @@ Install one of: `deno`, `node`, `quickjs`, or `quickjs-ng`. This is required by 
 ### Age-restricted videos are skipped
 
 Provide a cookie file from a logged-in YouTube account. See [Cookie File](#cookie-file-age-restricted-content).
+
+### YouTube returns HTTP 403 or asks you to sign in
+
+Run `./setup-update.sh` again. When Docker is available, that replaces `bgutil-provider` if it is missing, stopped, or still on an older image. `docker ps` should show `bgutil-provider` published on `127.0.0.1:4416`. A PO token does not replace cookies for an age-restricted video, and a missing provider does not block clients that do not ask for a token.
 
 ### Spotify playlists are truncated at ~100 tracks
 

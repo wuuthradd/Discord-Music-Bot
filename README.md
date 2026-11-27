@@ -16,6 +16,7 @@ A feature rich Discord music bot built with [discord.py](https://github.com/Rapp
 - **SQLite database** - All settings and playlists stored locally with WAL mode.
 - **Lightweight intents** - Only requires `guilds` and `voice_states` intents.
 - **Auto-updates** - Both pip packages and bot itself has auto update capabilites can be set with intervals or fixed time.
+- **YouTube PO token provider** - When Docker is already installed, setup starts a local bgutil service on `127.0.0.1:4416`. yt-dlp asks that service for a PO token by itself. Bot does not pass one.
 
 ## Documentation
 
@@ -25,7 +26,7 @@ A feature rich Discord music bot built with [discord.py](https://github.com/Rapp
 
 ## Quick Start
 
-Requires Python 3.10+, FFmpeg, and a JS runtime (deno, node, quickjs, or quickjs-ng).
+Requires Python 3.10+, FFmpeg, and a JS runtime (deno, node, quickjs, or quickjs-ng). Docker is used when it is already installed, to run the YouTube PO token provider.
 
 Clone the repo or download a zip/tar.gz from the [latest release](../../releases/latest).
 

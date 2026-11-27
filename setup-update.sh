@@ -12,6 +12,294 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 fail()  { echo -e "${RED}[x]${NC} $1"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# yt-dlp calls this service itself when a YouTube request needs a PO token.
+# The plugin's default address is http://127.0.0.1:4416. No bot code sets it.
+BGUTIL_IMAGE_REPO="brainicism/bgutil-ytdlp-pot-provider"
+BGUTIL_CONTAINER="bgutil-provider"
+BGUTIL_PUBLISH="127.0.0.1:4416:4416"
+
+bgutil_plugin_version() {
+    local pip_bin="" line ver=""
+    if [ -n "${BGUTIL_PIP:-}" ] && [ -x "${BGUTIL_PIP}" ]; then
+        pip_bin="$BGUTIL_PIP"
+    elif [ -x "$SCRIPT_DIR/.venv/bin/pip" ]; then
+        pip_bin="$SCRIPT_DIR/.venv/bin/pip"
+    else
+        return 0
+    fi
+    while IFS= read -r line; do
+        case "$line" in
+            "Version: "*) ver="${line#Version: }" ;;
+        esac
+    done < <("$pip_bin" show bgutil-ytdlp-pot-provider 2>/dev/null || true)
+    printf '%s' "$ver"
+}
+
+bgutil_container_state() {
+    docker container inspect --format '{{.Image}}|{{.State.Running}}|{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.Init}}|{{range $p, $conf := .HostConfig.PortBindings}}{{$p}}={{range $conf}}{{.HostIp}}:{{.HostPort}}{{end}};{{end}}' "$BGUTIL_CONTAINER" 2>/dev/null
+}
+
+# A running container alone does not prove that the provider is reachable.
+bgutil_ping() {
+    local python_bin
+    if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+        python_bin="$SCRIPT_DIR/.venv/bin/python"
+    elif command -v python3 >/dev/null 2>&1; then
+        python_bin=python3
+    else
+        return 1
+    fi
+    "$python_bin" - <<'PY' >/dev/null 2>&1
+import json
+from urllib.request import build_opener, ProxyHandler
+
+with build_opener(ProxyHandler({})).open("http://127.0.0.1:4416/ping", timeout=2) as response:
+    data = json.load(response)
+    if not isinstance(data.get("version"), str) or not isinstance(data.get("server_uptime"), (float, int)):
+        raise ValueError("Unexpected provider response")
+PY
+}
+
+bgutil_unavailable() {
+    if bgutil_ping; then
+        info "The local PO token API is reachable; its container was not managed by this check."
+    else
+        warn "The local PO token API is unavailable. The provider is optional; bot setup can continue."
+    fi
+}
+
+bgutil_service_hints() {
+    local scope="$1" active enabled user load_state
+    local -a ctl=(systemctl)
+    local cmd="sudo systemctl"
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "$scope" = "rootless" ]; then
+        ctl+=(--user)
+        cmd="systemctl --user"
+    elif [ "$scope" != "system" ]; then
+        return 0
+    fi
+    # Never assume Docker Desktop, a remote context or a non-systemd install
+    # is managed by the host's docker.service.
+    load_state="$("${ctl[@]}" show -p LoadState --value docker.service 2>/dev/null || true)"
+    if [ "$load_state" != "loaded" ] && [ "$load_state" != "masked" ]; then
+        return 0
+    fi
+    active="$("${ctl[@]}" is-active docker.service 2>/dev/null || true)"
+    enabled="$("${ctl[@]}" is-enabled docker.service 2>/dev/null || true)"
+    if [ "$active" = "active" ]; then
+        info "Docker service is active."
+        case "$enabled" in
+            disabled|enabled-runtime)
+                warn "Docker is not enabled persistently at boot. Run: $cmd enable docker.service"
+                ;;
+        esac
+    elif [ "$enabled" = "masked" ] || [ "$enabled" = "masked-runtime" ]; then
+        warn "Docker service is masked. Ask your administrator to review the service before enabling it."
+    else
+        warn "Docker service state: ${active:-unknown}."
+        warn "To start Docker and enable it at boot, run: $cmd enable --now docker.service"
+        if [ "$active" = "failed" ]; then
+            if [ "$scope" = "rootless" ]; then
+                warn "Inspect the service: journalctl --user -u docker.service -n 50 --no-pager"
+            else
+                warn "Inspect the service: sudo journalctl -u docker.service -n 50 --no-pager"
+            fi
+        fi
+    fi
+    if [ "$scope" = "rootless" ] && command -v loginctl >/dev/null 2>&1; then
+        user="$(id -un)"
+        if [ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null || true)" = "no" ]; then
+            warn "To keep rootless Docker running after logout and across boots, run: sudo loginctl enable-linger $user"
+        fi
+    fi
+}
+
+bgutil_wait_ready() {
+    local attempt
+    for attempt in {1..5}; do
+        if bgutil_ping; then
+            info "YouTube PO token provider is reachable at http://127.0.0.1:4416."
+            return 0
+        fi
+        if [ "$attempt" -lt 5 ]; then sleep 1; fi
+    done
+    warn "The provider did not answer its /ping endpoint. Inspect: docker logs --tail 50 $BGUTIL_CONTAINER"
+    return 1
+}
+
+ensure_bgutil() {
+    local ver image image_id state c_image c_running c_restart c_init c_ports
+    local endpoint scope="unknown" docker_error user configured_image
+
+    if ! command -v docker >/dev/null 2>&1; then
+        if bgutil_ping; then
+            info "Docker CLI was not found, but the local PO token API is reachable. Leaving it untouched."
+            return 0
+        fi
+        warn "Docker CLI was not found. To use the optional provider, install Docker Engine: https://docs.docker.com/engine/install/"
+        warn "On a standard systemd Docker Engine host, run: sudo systemctl enable --now docker.service"
+        warn "Configure non-root Docker access if required: https://docs.docker.com/engine/install/linux-postinstall/"
+        warn "After logging in again, run: bash setup-update.sh --bgutil-only"
+        warn "The provider is optional; bot setup can continue."
+        return 0
+    fi
+
+    # DOCKER_CONTEXT takes precedence over DOCKER_HOST when explicitly set.
+    if [ -n "${DOCKER_CONTEXT:-}" ]; then
+        endpoint="$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+    elif [ -n "${DOCKER_HOST:-}" ]; then
+        endpoint="$DOCKER_HOST"
+    else
+        endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+    fi
+    case "$endpoint" in
+        unix:///var/run/docker.sock|unix:///run/docker.sock) scope=system ;;
+        unix:///run/user/*/docker.sock) scope=rootless ;;
+        tcp://*|ssh://*|http://*|https://*)
+            warn "Docker uses a non-local endpoint. This script only manages a provider on the local host."
+            warn "Select a local Docker context or configure the provider manually."
+            bgutil_unavailable
+            return 0
+            ;;
+    esac
+
+    if ! docker_error="$(docker info --format '{{.ServerVersion}}' 2>&1)"; then
+        warn "Docker is installed, but the bot's user cannot reach its daemon."
+        printf '%s\n' "$docker_error"
+        bgutil_service_hints "$scope"
+        case "${docker_error,,}" in
+            *"permission denied"*|*"access denied"*)
+                if [ "$scope" = "system" ] && [ "$(id -u)" != "0" ]; then
+                    user="$(id -un)"
+                    warn "If you trust this account with root-equivalent Docker access, run: sudo usermod -aG docker $user"
+                    warn "Log out and back in; restart the bot's service/process manager to refresh its groups."
+                else
+                    warn "Check the selected Docker socket and the bot user's permissions."
+                fi
+                ;;
+            *) warn "Verify Docker is running and accessible with: docker info" ;;
+        esac
+        warn "After fixing access, rerun: bash setup-update.sh --bgutil-only"
+        bgutil_unavailable
+        return 0
+    fi
+    info "Docker daemon is reachable."
+    bgutil_service_hints "$scope"
+
+    # Do not overwrite an unrelated container or a manually managed provider.
+    if state="$(bgutil_container_state)"; then
+        configured_image="$(docker container inspect --format '{{.Config.Image}}' "$BGUTIL_CONTAINER")" || {
+            warn "Could not inspect the existing provider container."
+            return 1
+        }
+        case "$configured_image" in
+            "$BGUTIL_IMAGE_REPO"|"$BGUTIL_IMAGE_REPO":*|"$BGUTIL_IMAGE_REPO"@*|docker.io/"$BGUTIL_IMAGE_REPO"|docker.io/"$BGUTIL_IMAGE_REPO":*|docker.io/"$BGUTIL_IMAGE_REPO"@*) ;;
+            *)
+                warn "A container named $BGUTIL_CONTAINER uses a different image. It was left untouched."
+                warn "Inspect the existing container before resolving the name conflict: docker inspect $BGUTIL_CONTAINER"
+                bgutil_unavailable
+                return 0
+                ;;
+        esac
+    else
+        state=""
+        if bgutil_ping; then
+            info "A local PO token API is already reachable without the managed container. Leaving it untouched."
+            return 0
+        fi
+    fi
+
+    ver="$(bgutil_plugin_version)"
+    if [ -n "$ver" ] && docker pull "${BGUTIL_IMAGE_REPO}:${ver}"; then
+        image="${BGUTIL_IMAGE_REPO}:${ver}"
+    else
+        if [ -n "$ver" ]; then
+            warn "Could not pull provider image ${ver}. Trying latest; plugin/server compatibility may differ."
+        else
+            warn "Plugin version was not found. Pulling the latest provider image."
+        fi
+        if ! docker pull "${BGUTIL_IMAGE_REPO}:latest"; then
+            warn "Could not pull ${BGUTIL_IMAGE_REPO}:latest. Existing containers were left untouched."
+            warn "Check registry access and rerun: bash setup-update.sh --bgutil-only"
+            bgutil_unavailable
+            return 1
+        fi
+        image="${BGUTIL_IMAGE_REPO}:latest"
+    fi
+
+    if ! image_id="$(docker image inspect --format '{{.Id}}' "$image")"; then
+        warn "Could not inspect the downloaded provider image."
+        return 1
+    fi
+    if [ -n "$state" ]; then
+        IFS='|' read -r c_image c_running c_restart c_init c_ports <<< "$state"
+        if [ "$c_image" = "$image_id" ] && [ "$c_init" = "true" ] \
+            && [ "$c_ports" = "4416/tcp=127.0.0.1:4416;" ]; then
+            if [ "$c_restart" != "unless-stopped" ]; then
+                if ! docker update --restart unless-stopped "$BGUTIL_CONTAINER" >/dev/null; then
+                    warn "Could not set the provider's restart policy. Run: docker update --restart unless-stopped $BGUTIL_CONTAINER"
+                    return 1
+                fi
+                info "Provider restart policy set to unless-stopped."
+            fi
+            if [ "$c_running" != "true" ]; then
+                if ! docker start "$BGUTIL_CONTAINER" >/dev/null; then
+                    warn "Could not start the existing provider. Inspect: docker logs --tail 50 $BGUTIL_CONTAINER"
+                    return 1
+                fi
+                info "Started the existing provider container."
+            else
+                info "YouTube PO token provider container is already running (${image})."
+            fi
+            bgutil_wait_ready
+            return $?
+        fi
+        info "Replacing YouTube PO token provider container to update its image or configuration."
+        if ! docker rm -f "$BGUTIL_CONTAINER" >/dev/null; then
+            warn "Could not replace the existing provider container. Inspect: docker inspect $BGUTIL_CONTAINER"
+            return 1
+        fi
+    else
+        info "Creating YouTube PO token provider container."
+    fi
+
+    if ! docker run --name "$BGUTIL_CONTAINER" -d --init --restart unless-stopped \
+        -p "$BGUTIL_PUBLISH" "$image" >/dev/null; then
+        warn "Docker could not start the provider. Check port 4416, container name conflicts and Docker output."
+        warn "Inspect: docker ps -a; docker logs --tail 50 $BGUTIL_CONTAINER"
+        return 1
+    fi
+    bgutil_wait_ready
+}
+
+# pm2 puts Node's IPC descriptors in the environment. Deno treats
+# NODE_CHANNEL_FD as its own pipe, and yt-dlp's JS challenge solver then
+# exits with "fd is not from BiPipe". Unset is a no-op when pm2 is not used.
+write_run_bot() {
+    cat > "$SCRIPT_DIR/run_bot.sh" << 'EOF'
+#!/bin/bash
+cd "$(dirname "$0")"
+source .venv/bin/activate
+unset NODE_CHANNEL_FD NODE_CHANNEL_SERIALIZATION_MODE
+python main.py
+EOF
+    chmod +x "$SCRIPT_DIR/run_bot.sh"
+}
+
+if [ "${1:-}" = "--bgutil-only" ]; then
+    ensure_bgutil
+    exit $?
+fi
+
+if [ "${1:-}" = "--launcher-only" ]; then
+    write_run_bot
+    exit 0
+fi
+
 cd "$SCRIPT_DIR"
 
 # --- 1. Python ---
@@ -157,14 +445,14 @@ info "Installing requirements..."
 
 info "Requirements installed"
 
+# --- 7b. YouTube PO token provider ---
+info "Checking YouTube PO token provider..."
+if ! ensure_bgutil; then
+    warn "YouTube PO token provider was not updated. Playback can continue with clients that do not need a token."
+fi
+
 # --- 8. Create run_bot.sh ---
-cat > run_bot.sh << 'EOF'
-#!/bin/bash
-cd "$(dirname "$0")"
-source .venv/bin/activate
-python main.py
-EOF
-chmod +x run_bot.sh
+write_run_bot
 
 info "Created run_bot.sh"
 

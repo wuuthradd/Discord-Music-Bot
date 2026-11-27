@@ -5,12 +5,14 @@ import logging
 import os
 import shutil
 import re
+import yt_dlp
+from yt_dlp.networking.impersonate import ImpersonateTarget
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-
-import yt_dlp
+from html.parser import HTMLParser
+from urllib.request import Request, urlopen
 
 _log = logging.getLogger(__name__)
 
@@ -155,6 +157,11 @@ def _ydl_options(base: dict, *, silent: bool = False) -> dict:
     opts.setdefault("socket_timeout", 15)
     opts.setdefault("retries", 2)
     opts.setdefault("extractor_retries", 2)
+    opts.setdefault("extractor_args", {
+        "youtube": {
+            "player_client": ["web_embedded", "tv_samsung"],
+        }
+    })
     if silent:
         opts["quiet"] = True
         opts["no_warnings"] = True
@@ -270,7 +277,7 @@ def is_playable_entry(entry: dict) -> bool:
 
 _HEAVY_KEYS = ("formats", "automatic_captions", "subtitles", "heatmap",
                "chapters", "thumbnails", "requested_downloads",
-               "http_headers", "requested_subtitles", "cookies",
+               "requested_subtitles", "cookies",
                "__x_forwarded_for_ip", "_type",
                "channel_id", "channel_is_verified", "channel_url",
                "description", "live_status", "release_timestamp",
@@ -284,20 +291,27 @@ def _resolve_url_from_formats(entry: dict) -> None:
     formats = entry.get("formats")
     if not formats:
         return
-    audio_url = None
-    fallback_url = None
-    for f in reversed(formats):
-        if f.get("acodec") == "none" or "url" not in f:
+    selected = None
+    fallback = None
+    for fmt in reversed(formats):
+        if fmt.get("acodec") in (None, "none") or not fmt.get("url"):
             continue
-        if f.get("vcodec") == "none":
-            audio_url = f["url"]
+        if fmt.get("vcodec") == "none":
+            selected = fmt
             break
-        if fallback_url is None:
-            fallback_url = f["url"]
-    audio_url = audio_url or fallback_url
-    if audio_url:
-        entry["url"] = audio_url
+        if fallback is None:
+            fallback = fmt
+    selected = selected or fallback
+    if selected:
+        entry["url"] = selected["url"]
+        entry["acodec"] = selected.get("acodec")
+        entry["abr"] = selected.get("abr")
+        entry["http_headers"] = {
+            **(entry.get("http_headers") or {}),
+            **(selected.get("http_headers") or {}),
+        }
         entry["_prepared_source"] = True
+
 
 
 def slim_entry(entry: dict) -> None:
@@ -328,6 +342,58 @@ def has_valid_cookies() -> bool:
     """Returns True if a cookie file is configured and exists."""
     return bool(YTDLP_COOKIE_FILE)
 
+def _oginstagram_reel_url(url: str) -> str | None:
+    parsed = urlparse(url)
+
+    if parsed.hostname not in {
+        "instagram.com",
+        "www.instagram.com",
+        "m.instagram.com",
+    }:
+        return None
+
+    match = re.fullmatch(
+        r"/(?:reel|reels)/([A-Za-z0-9_-]+)/?",
+        parsed.path,
+    )
+    if not match:
+        return None
+
+    return f"https://d.oginstagram.com/reels/{match.group(1)}/"
+
+def _get_instagram_display_name(media_id: str) -> str | None:
+    class TitleParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.display_name = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag != "meta":
+                return
+
+            attributes = dict(attrs)
+
+            if attributes.get("property") == "og:title":
+                title = attributes.get("content", "").strip()
+                self.display_name = re.sub(
+                    r"\s*\(@[^()]+\)\s*$", "", title
+                ).strip() or None
+
+    url = f"https://www.oginstagram.com/reel/{media_id}/"
+
+    try:
+        request = Request(url, headers={"User-Agent": "Discordbot/2.0"})
+
+        with urlopen(request, timeout=6) as response:
+            html = response.read(1_000_000).decode("utf-8", errors="replace")
+
+        parser = TitleParser()
+        parser.feed(html)
+        return parser.display_name
+
+    except Exception:
+        return None
+
 async def _run_ydl_info(target: str, options: dict) -> dict:
     """Runs yt-dlp extraction in a separate thread executor."""
     loop = asyncio.get_running_loop()
@@ -336,6 +402,11 @@ async def _run_ydl_info(target: str, options: dict) -> dict:
 
     def _inner():
         local_opts = dict(options)
+        media_target = _oginstagram_reel_url(target) or target
+
+        if "bandcamp.com" in target.lower():
+            local_opts["impersonate"] = ImpersonateTarget.from_str("firefox")
+
         tmp_cookie = _temp_cookie_copy()
         if tmp_cookie:
             local_opts["cookiefile"] = tmp_cookie
@@ -345,7 +416,27 @@ async def _run_ydl_info(target: str, options: dict) -> dict:
         local_opts["logger"] = cap_logger
         try:
             with yt_dlp.YoutubeDL(local_opts) as ydl:
-                return ydl.extract_info(target, download=False)
+                info = ydl.extract_info(media_target, download=False)
+
+                if media_target != target and isinstance(info, dict):
+                    match = re.fullmatch(
+                        r"/reels?/([A-Za-z0-9_-]+)/?",
+                        urlparse(target).path,
+                    )
+
+                    if match:
+                        media_id = match.group(1)
+                        display_name = _get_instagram_display_name(media_id)
+
+                        info["title"] = f"{display_name or 'Instagram'} - reel/{media_id}"
+                        info["id"] = media_id
+
+                    info["webpage_url"] = target
+
+                    if info.get("url"):
+                        info["_prepared_source"] = True
+
+                return info
         finally:
             if tmp_cookie:
                 try:

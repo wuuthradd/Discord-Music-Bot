@@ -1,6 +1,7 @@
 discord.py[voice]
-yt-dlp[default]
+yt-dlp[default,curl-cffi]>=0.dev0
 python-dotenv
 aiosqlite
 psutil
 spotapi
+bgutil-ytdlp-pot-provider

@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.2
+
+- Added automatic YouTube PO token provider setup and updates using Docker.
+- Added Docker diagnostics and setup guidance to `/manage`.
+- Added Instagram Reels playback support.
+- Fixed Bandcamp extraction.
+- Improved audio playback reliability and fixed skipped audio at playback start.
+- Fixed Deno compatibility with PM2.
+
 ## v1.1.1
 
 - Added yt-dlp piped extraction for sources that needs it (TikTok).

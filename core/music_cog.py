@@ -10433,6 +10433,50 @@ class MusicCog(MusicHandlers):
                 changes.append(f"{pkg}: {old_ver} -> {new_ver}")
         return changes, len(changes) > 0
 
+    async def _ensure_bgutil(self) -> str:
+        """Check the provider and return concise status lines for the owner UI."""
+        script = os.path.join(self._BOT_ROOT, "setup-update.sh")
+        if not os.path.isfile(script):
+            message = "[!] setup-update.sh is missing; the PO token provider was not checked."
+            print(message)
+            return message
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bash", script, "--bgutil-only",
+                cwd=self._BOT_ROOT,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await proc.communicate()
+        except OSError as exc:
+            _log.warning("Could not run PO token provider check: %s", exc)
+            return "[!] Could not run the provider check. See the bot logs."
+        text = stdout.decode(errors="replace").strip()
+        if text:
+            print(text)
+        clean = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        lines = [line for line in clean.splitlines() if line.startswith(("[+] ", "[!] ", "[x] "))]
+        if proc.returncode != 0:
+            lines.append("[!] Provider check failed. See the bot logs for details.")
+        return "\n".join(lines) or "[!] No provider status was returned. See the bot logs."
+
+    async def _send_bgutil_report(self, interaction: discord.Interaction, report: str):
+        """Report status to the owner without leaking verbose Docker logs."""
+        header = "**YouTube PO Token Provider**\n"
+        try:
+            # Keep complete lines (especially manual commands) within Discord's limit.
+            chunk = header
+            for line in report.splitlines():
+                line = line[:1800]
+                if len(chunk) + len(line) + 1 > 1900:
+                    await interaction.followup.send(chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+                    chunk = header
+                chunk += line + "\n"
+            if chunk != header:
+                await interaction.followup.send(chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            _log.warning("Could not send PO token provider status to the owner.")
+
     async def _check_latest_version(self) -> tuple[str | None, str | None]:
         """Check GitHub for latest release. Returns (latest_version, download_url) or (None, None)."""
         import aiohttp
@@ -10511,6 +10555,21 @@ class MusicCog(MusicHandlers):
 
         # Run pip install after code update in case requirements changed
         pip_changes, _ = await self._run_pip_update()
+        # Rewrite run_bot.sh from the script that just landed. A process
+        # manager restarts that file, and an older copy would keep pm2's
+        # Node IPC variables in the environment.
+        launcher = os.path.join(self._BOT_ROOT, "setup-update.sh")
+        if os.path.isfile(launcher):
+            proc = await asyncio.create_subprocess_exec(
+                "bash", launcher, "--launcher-only",
+                cwd=self._BOT_ROOT,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                text = stdout.decode(errors="replace").strip()
+                print(f"[Update] Could not refresh run_bot.sh: {text[:200]}")
         msg = f"Updated v{current} -> v{latest}."
         if pip_changes:
             msg += f" Packages updated: {', '.join(pip_changes)}"
@@ -10546,6 +10605,7 @@ class MusicCog(MusicHandlers):
                         if current_hour == fixed_hour and now - self._last_pkg_update >= 3600:
                             self._last_pkg_update = now
                             changes, changed = await self._run_pip_update()
+                            await self._ensure_bgutil()
                             if changed:
                                 print(f"[Auto-update] Packages updated: {', '.join(changes)}")
                                 print("[Auto-update] Restarting...")
@@ -10556,6 +10616,7 @@ class MusicCog(MusicHandlers):
                         if now - self._last_pkg_update >= interval:
                             self._last_pkg_update = now
                             changes, changed = await self._run_pip_update()
+                            await self._ensure_bgutil()
                             if changed:
                                 print(f"[Auto-update] Packages updated: {', '.join(changes)}")
                                 print("[Auto-update] Restarting...")
@@ -10570,6 +10631,7 @@ class MusicCog(MusicHandlers):
                         if current_hour == fixed_hour and now - self._last_bot_update >= 3600:
                             self._last_bot_update = now
                             msg, updated = await self._run_bot_update()
+                            await self._ensure_bgutil()
                             if updated:
                                 print(f"[Auto-update] {msg}")
                                 print("[Auto-update] Restarting...")
@@ -10582,6 +10644,7 @@ class MusicCog(MusicHandlers):
                         if now - self._last_bot_update >= interval:
                             self._last_bot_update = now
                             msg, updated = await self._run_bot_update()
+                            await self._ensure_bgutil()
                             if updated:
                                 print(f"[Auto-update] {msg}")
                                 print("[Auto-update] Restarting...")
@@ -10869,6 +10932,8 @@ class MusicCog(MusicHandlers):
                     item.disabled = True
                 await btn_interaction.response.edit_message(view=view)
                 changes, changed = await cog._run_pip_update()
+                bgutil_report = await cog._ensure_bgutil()
+                await cog._send_bgutil_report(btn_interaction, bgutil_report)
                 if changed:
                     msg = t(btn_interaction, "MNG_UPDATES_PKG_CHANGED", changes=", ".join(changes))
                     try:
@@ -10961,6 +11026,8 @@ class MusicCog(MusicHandlers):
                     item.disabled = True
                 await btn_interaction.response.edit_message(view=view)
                 msg, updated = await cog._run_bot_update()
+                bgutil_report = await cog._ensure_bgutil()
+                await cog._send_bgutil_report(btn_interaction, bgutil_report)
                 if updated:
                     try:
                         await btn_interaction.followup.send(msg, ephemeral=True)

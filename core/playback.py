@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import shlex
 import subprocess
 import sys
 
@@ -46,11 +48,37 @@ from core.media import (
     extract_entries,
     _run_ydl_info,
     _ydl_options,
+    _resolve_url_from_formats,
     StaleCookieError,
     BotDetectionError,
     JSRuntimeError,
     has_valid_cookies,
 )
+
+class PrimedAudioSource(discord.AudioSource):
+    """Preserve the first Opus packet read before Discord starts its playback clock."""
+
+    def __init__(self, source: discord.AudioSource, first_packet: bytes):
+        self._source = source
+        self._first_packet: bytes | None = first_packet
+
+    def read(self) -> bytes:
+        if self._first_packet is not None:
+            packet = self._first_packet
+            self._first_packet = None
+            return packet
+        return self._source.read()
+
+    def is_opus(self) -> bool:
+        return self._source.is_opus()
+
+    @property
+    def _current_error(self):
+        return getattr(self._source, "_current_error", None)
+
+    def cleanup(self) -> None:
+        self._source.cleanup()
+
 
 class GuildMusicState:
     def __init__(self, guild_id: int):
@@ -430,18 +458,8 @@ class PlaybackManager:
             }, silent=self.is_silent_log(guild_id))
         )
 
+        _resolve_url_from_formats(full)
         audio_url = full.get("url")
-        if not audio_url:
-            fallback_url = None
-            for f in reversed(full.get("formats", [])):
-                if f.get("acodec") == "none" or "url" not in f:
-                    continue
-                if f.get("vcodec") == "none":
-                    audio_url = f["url"]
-                    break
-                if fallback_url is None:
-                    fallback_url = f["url"]
-            audio_url = audio_url or fallback_url
 
         if not audio_url:
             raise ValueError(t(None, "AUDIO_FORMAT_MISSING"))
@@ -449,6 +467,8 @@ class PlaybackManager:
         for key in self._STREAM_KEYS:
             if key in full:
                 entry[key] = full[key]
+        for key in ("http_headers", "acodec", "abr"):
+            entry[key] = full.get(key)
         if full.get("track") and full.get("artist"):
             entry["title"] = full["track"]
         entry["url"] = audio_url
@@ -472,19 +492,30 @@ class PlaybackManager:
         if extractor in _PIPE_EXTRACTORS and webpage_url:
             return await self._build_piped_source(webpage_url, seek_prefix, silent)
 
-        codec = "copy"
-        try:
-            codec, _ = await asyncio.wait_for(
-                discord.FFmpegOpusAudio.probe(url), timeout=10
-            )
-        except (asyncio.TimeoutError, Exception):
-            pass
+        # Trust the chosen yt-dlp format for Opus passthrough. Unknown codecs
+        # must be transcoded; never assume Opus when probing fails.
+        source_codec = entry.get("acodec")
+        codec = "copy" if source_codec in ("opus", "libopus") else None
+
+        # Preserve extractor HTTP headers when FFmpeg opens the media URL.
+        headers = []
+        for name, value in (entry.get("http_headers") or {}).items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                continue
+            if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+                continue
+            if any(c in value for c in "\r\n\0"):
+                continue
+            headers.append(f"{name}: {value}\r\n")
+        header_options = f"-headers {shlex.quote(''.join(headers))} " if headers else ""
 
         before = (
             f"{seek_prefix}"
+            f"{header_options}"
             f"-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 "
-            f'-reconnect_on_http_error "429,500,502,503" '
-            f"-reconnect_delay_max 15 "
+            f'-reconnect_on_http_error "403,429,500,502,503" '
+            f"-reconnect_max_retries 5 -reconnect_delay_total_max 12 "
+            f"-reconnect_delay_max 5 "
             f"-rw_timeout 15000000 -probesize 131072 -analyzeduration 131072 "
             f"-nostdin"
         )
@@ -667,14 +698,33 @@ class PlaybackManager:
                 state.now = next_entry
                 state.paused_at = None
                 state._total_paused = 0.0
-                state.playing_since = time.time()
+                state.playing_since = None
                 state._seeking = False
                 if not vc.is_connected():
                     self._mark_idle(state, guild_id)
                     self._fire_track_change(guild_id)
                     return
                 source = await self._build_audio_source(state.now, guild_id)
+                try:
+                    # Opening a YouTube URL can stall while FFmpeg retries HTTP 403.
+                    # Read the first packet BEFORE Discord starts its playback timer.
+                    # The packet is retained and delivered exactly once by the wrapper.
+                    first_packet = await asyncio.wait_for(
+                        asyncio.to_thread(source.read), timeout=30
+                    )
+                    if not first_packet:
+                        raise RuntimeError("FFmpeg produced no audio at stream startup")
+                except asyncio.CancelledError:
+                    source.cleanup()
+                    raise
+                except Exception as e:
+                    source.cleanup()
+                    print(f"[Audio startup error] {next_entry.get('title', '?')}: {e}")
+                    load_failures += 1
+                    self._unloop_failed(state)
+                    continue
 
+                source = PrimedAudioSource(source, first_packet)
                 if not state.playing:
                     source.cleanup()
                     self._fire_track_change(guild_id)
@@ -687,6 +737,7 @@ class PlaybackManager:
                     self._mark_idle(state, guild_id)
                     self._fire_track_change(guild_id)
                     return
+                state.playing_since = time.time()
                 started = True
                 state._consecutive_ffmpeg_errors = 0
                 # Cancel any existing live timer, start a new one if this is a live track
